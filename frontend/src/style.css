@@ -1,0 +1,199 @@
+/* =====================================================================
+   【校园 AI 心理委员】前端全局视觉设计系统 (Morandi Palette System)
+   ===================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+
+:root {
+  /* 日间模式 (燕麦白 / 柔米色调) */
+  --bg-color: #F7F5F0;
+  --panel-bg: #FFFFFF;
+  --text-primary: #4A4A4A;
+  --text-secondary: #7A7A7A;
+  
+  --primary: #A3B19B;         /* 鼠尾草绿 (AI/主视觉) */
+  --primary-hover: #8C9C84;
+  --primary-light: #F0F3EF;
+  
+  --accent: #E8A7A1;          /* 落日暖橙/柔焦粉 (用户/强调) */
+  --accent-hover: #D9958F;
+  --accent-light: #FDF4F3;
+  
+  --warning: #D98880;         /* 淡绛红/柔和红 (警示) */
+  --warning-light: #FBECEB;
+  
+  --border-color: #E2DDD5;
+  --shadow-color: rgba(163, 177, 155, 0.15);
+  --shadow-hover: rgba(163, 177, 155, 0.25);
+  
+  --radius-lg: 20px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+  
+  --transition-normal: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  --transition-slow: all 0.5s ease;
+}
+
+/* 夜间模式 (暗灰蓝调) */
+body.night-mode {
+  --bg-color: #222A2E;
+  --panel-bg: #2C3539;
+  --text-primary: #E5E5E5;
+  --text-secondary: #9FA6AD;
+  
+  --primary: #7A8973;
+  --primary-hover: #677561;
+  --primary-light: #3A433F;
+  
+  --accent: #C48781;
+  --accent-hover: #B0746E;
+  --accent-light: #443B3A;
+  
+  --warning: #C27068;
+  --warning-light: #443433;
+  
+  --border-color: #3E494E;
+  --shadow-color: rgba(0, 0, 0, 0.25);
+  --shadow-hover: rgba(0, 0, 0, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  font-family: 'Outfit', 'Noto Sans SC', sans-serif;
+  transition: var(--transition-slow);
+  overflow-x: hidden;
+}
+
+/* =====================================================================
+   微质感与云朵圆角系统
+   ===================================================================== */
+.card-panel {
+  background-color: var(--panel-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 30px var(--shadow-color);
+  border: 1px solid var(--border-color);
+  transition: var(--transition-normal);
+}
+
+.card-panel:hover {
+  box-shadow: 0 15px 35px var(--shadow-hover);
+  transform: translateY(-2px);
+}
+
+/* 温润扁平化大圆角输入框 */
+.input-field {
+  width: 100%;
+  padding: 14px 20px;
+  font-size: 15px;
+  color: var(--text-primary);
+  background-color: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: var(--transition-normal);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
+}
+
+/* 情绪呼吸灯动效 (每分钟 16 次人类静息呼吸频率，单次周期为 60s/16 = 3.75s) */
+@keyframes emotion-breath {
+  0% {
+    box-shadow: 0 0 0 0px rgba(163, 177, 155, 0.2), 0 2px 6px rgba(0,0,0,0.02);
+    border-color: var(--primary);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(163, 177, 155, 0.4), 0 4px 12px rgba(163, 177, 155, 0.15);
+    border-color: var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 0px rgba(163, 177, 155, 0.2), 0 2px 6px rgba(0,0,0,0.02);
+    border-color: var(--primary);
+  }
+}
+
+.input-field:focus {
+  animation: emotion-breath 3.75s infinite ease-in-out;
+}
+
+/* 温润触觉按钮 */
+.btn-primary {
+  padding: 14px 28px;
+  font-size: 16px;
+  font-weight: 500;
+  color: #FFFFFF;
+  background-color: var(--primary);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  box-shadow: 0 4px 15px var(--shadow-color);
+  transition: var(--transition-normal);
+}
+
+.btn-primary:hover {
+  background-color: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px var(--shadow-hover);
+}
+
+.btn-primary:active {
+  transform: translateY(1px);
+}
+
+.btn-accent {
+  padding: 14px 28px;
+  font-size: 16px;
+  font-weight: 500;
+  color: #FFFFFF;
+  background-color: var(--accent);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  box-shadow: 0 4px 15px var(--shadow-color);
+  transition: var(--transition-normal);
+}
+
+.btn-accent:hover {
+  background-color: var(--accent-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px var(--shadow-hover);
+}
+
+.btn-accent:active {
+  transform: translateY(1px);
+}
+
+/* =====================================================================
+   去 AI 机械化——微动效与手绘微雕感
+   ===================================================================== */
+.avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--border-color);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+}
+
+/* 打字机光标动效 */
+.typing-cursor::after {
+  content: '|';
+  animation: blink 0.8s infinite step-start;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* 通用淡入淡出动画 */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.4s ease;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
+}

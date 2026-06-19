@@ -1,0 +1,34 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environments (contains secrets like SiliconFlow API keys)
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Local databases & storage (ChromaDB files)
+backend/instance/
+instance/
+chroma_db/
+.chroma/
+
+# Node modules & frontend builds
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+
+# OS/IDE metadata
+.idea/
+.vscode/
+.DS_Store
+*.suo
+*.suo*
+*.user
