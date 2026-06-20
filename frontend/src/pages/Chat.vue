@@ -1,30 +1,15 @@
 <template>
   <div class="chat-container">
     <!-- 侧边会话面板 -->
-    <div class="sidebar card-panel">
-      <div class="sidebar-header">
-        <span class="logo-emoji">🌱</span>
-        <span class="app-name">MindEcho</span>
-      </div>
-      <div class="user-info">
-        <div class="avatar-container">
-          <div class="avatar-placeholder">👤</div>
-        </div>
-        <div class="user-details">
-          <p class="user-nickname">{{ nickname }}</p>
-          <p class="user-role">学生账户</p>
-        </div>
-      </div>
-      <div class="sessions-list">
-        <div class="session-item active">
-          <span class="session-icon">💬</span>
-          <span class="session-title">与水豚豚的温泉树洞</span>
-        </div>
-      </div>
-      <button class="logout-btn" @click="handleLogout">
-        🚪 退出登录
-      </button>
-    </div>
+    <ChatSidebar
+      :sessions="sessions"
+      :activeSessionId="activeSessionId"
+      :isCreatingSession="isCreatingSession"
+      :nickname="nickname"
+      @select-session="selectSession"
+      @create-session="createSession"
+      @logout="handleLogout"
+    />
 
     <!-- 聊天主窗口 -->
     <div class="chat-main card-panel">
@@ -33,81 +18,296 @@
           <CapybaraSvg size="50px" />
         </div>
         <div class="ai-details">
-          <h3>水豚委员 • 豚豚</h3>
-          <span class="status-indicator">● 保持松弛，听你倾诉</span>
+          <h3>小影 • AI 心理委员</h3>
+          <span class="status-indicator">● 温柔包容，非批判性陪伴</span>
+        </div>
+        <div v-if="activeSession?.is_anonymous" class="active-mode-tag incognito">
+          🛡️ 无痕加密模式已开启
         </div>
       </div>
 
-      <div class="messages-area">
-        <!-- AI 消息 (鼠尾草绿背景) -->
-        <div class="msg-row ai">
-          <div class="msg-avatar-svg"><CapybaraSvg size="38px" /></div>
-          <div class="msg-bubble ai-bubble">
-            <p>你好呀，{{ nickname }}。我是你的 AI 心理委员豚豚。就像我和小鸭子在温泉里泡澡一样，希望你在这里也能感受到温暖和彻底的松弛。不管是学习压力、人际交往，还是个人情感，你都可以在这和我说说。这是一个绝对私密的树洞，我会像水豚一样情绪稳定地陪伴着你。🌿</p>
-          </div>
-        </div>
+      <!-- 消息区 -->
+      <MessageArea
+        ref="messagesAreaRef"
+        :messages="messages"
+        :isGenerating="isGenerating"
+        :isAnonymous="activeSession?.is_anonymous || false"
+        :nickname="nickname"
+      />
 
-        <!-- 模拟用户消息 (落日粉背景) -->
-        <div class="msg-row user">
-          <div class="msg-bubble user-bubble">
-            <p>豚豚，这两天快期末考试了，我有点焦虑睡不好觉...</p>
-          </div>
-          <div class="msg-avatar">👤</div>
-        </div>
-
-        <!-- AI 回复 -->
-        <div class="msg-row ai">
-          <div class="msg-avatar-svg"><CapybaraSvg size="38px" /></div>
-          <div class="msg-bubble ai-bubble">
-            <p>听起来快到期末了，各科的备考确实让你感觉到了很大的压力。晚上睡不好会让人白天更加疲惫焦虑，这很正常，不用因此责怪自己。我们试着像水豚一样做一个缓慢的深呼吸，或者试试“五感着陆法”来放松一下大脑，你觉得可以吗？</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 情绪呼吸灯输入框 -->
-      <div class="input-area">
-        <input 
-          type="text" 
-          class="input-field" 
-          placeholder="把你的烦恼写在这里，我会一直倾听... (焦点时将开启呼吸调节引导)"
-        />
-        <button class="btn-primary send-btn">发送</button>
-      </div>
+      <!-- 底栏输入框 -->
+      <ChatInput
+        ref="chatInputRef"
+        :isGenerating="isGenerating"
+        @send-message="sendMessage"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import axios from 'axios'
 import CapybaraSvg from '../components/CapybaraSvg.vue'
+import ChatSidebar from '../components/chat/ChatSidebar.vue'
+import MessageArea from '../components/chat/MessageArea.vue'
+import ChatInput from '../components/chat/ChatInput.vue'
 
 const router = useRouter()
+
+// 状态定义
 const nickname = ref('同学')
+const token = ref('')
+const sessions = ref([])
+const activeSessionId = ref('')
+const messages = ref([])
+const isGenerating = ref(false)
+
+// 会话创建相关状态
+const isCreatingSession = ref(false)
+
+// 内存版无痕会话历史消息记录字典
+const sessionMessagesMap = reactive({})
+
+// DOM / 组件引用
+const messagesAreaRef = ref(null)
+const chatInputRef = ref(null)
+
+// 计算属性：当前激活的会话对象
+const activeSession = computed(() => {
+  return sessions.value.find(s => s.id === activeSessionId.value)
+})
 
 // 原生 Base64 令牌负载解析
-function getPayload(token) {
+function getPayload(tokenStr) {
   try {
-    return JSON.parse(atob(token.split('.')[1]));
+    return JSON.parse(atob(tokenStr.split('.')[1]));
   } catch (e) {
     return null;
   }
 }
 
-onMounted(() => {
-  const token = localStorage.getItem('token')
-  if (token) {
-    const payload = getPayload(token)
-    if (payload) {
-      nickname.value = payload.sub
+// 自动滚动到底部
+const scrollToBottom = async () => {
+  await nextTick()
+  if (messagesAreaRef.value) {
+    messagesAreaRef.value.scrollToBottom()
+  }
+}
+
+// 监听消息列表变化并滚动
+watch(messages, () => {
+  scrollToBottom()
+}, { deep: true })
+
+// 加载用户所有会话列表
+async function fetchSessions() {
+  try {
+    const res = await axios.get('/api/chat/sessions', {
+      headers: { Authorization: `Bearer ${token.value}` }
+    })
+    if (res.data && res.data.code === 200) {
+      sessions.value = res.data.data
+      
+      // 如果没有激活会话，且列表不为空，默认选中第一个
+      if (!activeSessionId.value && sessions.value.length > 0) {
+        await selectSession(sessions.value[0].id)
+      }
+    }
+  } catch (e) {
+    console.error("加载会话列表失败:", e)
+  }
+}
+
+// 选择会话
+async function selectSession(sessionId) {
+  activeSessionId.value = sessionId
+  const session = sessions.value.find(s => s.id === sessionId)
+  if (!session) return
+
+  // A. 若是无痕会话，在内存 Map 中维护
+  if (session.is_anonymous) {
+    if (!sessionMessagesMap[sessionId]) {
+      sessionMessagesMap[sessionId] = []
+    }
+    messages.value = sessionMessagesMap[sessionId]
+  } 
+  // B. 若是常规会话，从后端 MySQL 载入历史记录，并缓存至 Map
+  else {
+    try {
+      const res = await axios.get(`/api/chat/session/${sessionId}/history`, {
+        headers: { Authorization: `Bearer ${token.value}` }
+      })
+      if (res.data && res.data.code === 200) {
+        const dbMsgs = res.data.data.map(msg => ({
+          sender: msg.sender,
+          content: msg.content,
+          intent: msg.intent,
+          reason: msg.reason || '',
+          ragCards: []
+        }))
+        sessionMessagesMap[sessionId] = dbMsgs
+        messages.value = sessionMessagesMap[sessionId]
+      }
+    } catch (e) {
+      console.error("加载消息历史失败:", e)
+      messages.value = []
     }
   }
-})
+  
+  await scrollToBottom()
+  nextTick(() => {
+    if (chatInputRef.value) {
+      chatInputRef.value.focus()
+    }
+  })
+}
 
+// 创建新会话
+async function createSession(isIncognito = false) {
+  if (isCreatingSession.value) return
+  isCreatingSession.value = true
+  try {
+    const defaultTitle = isIncognito ? '无痕新对话' : '新对话'
+    const res = await axios.post('/api/chat/session', {
+      title: defaultTitle,
+      is_anonymous: isIncognito
+    }, {
+      headers: { Authorization: `Bearer ${token.value}` }
+    })
+    
+    if (res.data && res.data.code === 200) {
+      const newSession = res.data.data
+      await fetchSessions()
+      await selectSession(newSession.id)
+    }
+  } catch (e) {
+    console.error("创建会话失败:", e)
+  } finally {
+    isCreatingSession.value = false
+  }
+}
+
+// 发送消息并流式 SSE 渲染
+async function sendMessage(content) {
+  if (isGenerating.value || !activeSessionId.value) return
+  
+  isGenerating.value = true
+
+  // 1. 将用户输入追加到当前消息列表和缓存中
+  const userMsg = { sender: 'user', content: content }
+  messages.value.push(userMsg)
+  
+  // 初始化一个空的 AI 响应占位符
+  const aiMsg = reactive({
+    sender: 'ai',
+    content: '',
+    intent: '',
+    reason: '',
+    ragCards: []
+  })
+  
+  messages.value.push(aiMsg)
+  await scrollToBottom()
+
+  try {
+    // 2. 利用 fetch API 读取流式数据以注入 Header - 修改为直连后端绝对地址
+    const response = await fetch('http://localhost:5000/api/chat/message', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token.value}`
+      },
+      body: JSON.stringify({
+        session_id: activeSessionId.value,
+        content: content
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP 异常! 状态码: ${response.status}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      
+      const events = buffer.split(/\r?\n\r?\n/)
+      buffer = events.pop()
+
+      for (const rawEvent of events) {
+        const line = rawEvent.trim()
+        if (!line.startsWith('data:')) continue
+
+        const dataStr = line.substring(5).trim()
+        if (dataStr === '[DONE]') {
+          break
+        }
+
+        try {
+          const parsed = JSON.parse(dataStr)
+          
+          if (parsed.intent) {
+            aiMsg.intent = parsed.intent
+            aiMsg.reason = parsed.reason || ''
+            aiMsg.ragCards = parsed.rag_cards || []
+            
+            // 捕获自动生成的会话标题并更新侧边栏
+            if (parsed.new_title) {
+              const sess = sessions.value.find(s => s.id === activeSessionId.value)
+              if (sess) {
+                sess.title = parsed.new_title
+              }
+            }
+          } else if (parsed.content) {
+            aiMsg.content += parsed.content
+          } else if (parsed.error) {
+            aiMsg.content += `\n⚠️ [系统提示: ${parsed.message || '模型推理异常'}]`
+          }
+        } catch (pe) {
+          console.warn("解析流数据分块出错:", pe, dataStr)
+        }
+      }
+    }
+  } catch (error) {
+    console.error("流式读取异常:", error)
+    aiMsg.content += `\n⚠️ [网络通讯发生异常，请检查网络连接]`
+  } finally {
+    isGenerating.value = false
+    if (activeSession.value?.is_anonymous) {
+      sessionMessagesMap[activeSessionId.value] = [...messages.value]
+    }
+    await scrollToBottom()
+  }
+}
+
+// 退出登录
 function handleLogout() {
   localStorage.removeItem('token')
   router.push('/login')
 }
+
+// 初始化
+onMounted(() => {
+  const localToken = localStorage.getItem('token')
+  if (localToken) {
+    token.value = localToken
+    const payload = getPayload(localToken)
+    if (payload) {
+      nickname.value = payload.sub
+    }
+    fetchSessions()
+  } else {
+    router.push('/login')
+  }
+})
 </script>
 
 <style scoped>
@@ -117,89 +317,7 @@ function handleLogout() {
   padding: 20px;
   gap: 20px;
   background-color: var(--bg-color);
-}
-
-/* 侧边栏 */
-.sidebar {
-  width: 260px;
-  display: flex;
-  flex-direction: column;
-  padding: 25px 15px;
-  border-radius: var(--radius-lg);
-  background-color: var(--panel-bg);
-}
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 20px;
-  font-weight: 600;
-  margin-bottom: 30px;
-  color: var(--primary);
-}
-.logo-emoji {
-  font-size: 24px;
-}
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  background-color: var(--primary-light);
-  border-radius: var(--radius-md);
-  margin-bottom: 25px;
-}
-.avatar-placeholder {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background-color: var(--panel-bg);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  font-size: 20px;
-}
-.user-nickname {
-  font-weight: 500;
-  font-size: 15px;
-}
-.user-role {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-.sessions-list {
-  flex: 1;
-}
-.session-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 15px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: var(--transition-normal);
-  font-size: 14px;
-}
-.session-item.active {
-  background-color: var(--primary-light);
-  color: var(--primary-hover);
-  font-weight: 500;
-}
-.logout-btn {
-  background: transparent;
-  border: 1px solid var(--border-color);
-  padding: 12px;
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
-  font-size: 14px;
-  cursor: pointer;
-  transition: var(--transition-normal);
-}
-.logout-btn:hover {
-  background-color: var(--warning-light);
-  border-color: var(--warning);
-  color: #C0392B;
+  box-sizing: border-box;
 }
 
 /* 聊天主界面 */
@@ -208,6 +326,9 @@ function handleLogout() {
   display: flex;
   flex-direction: column;
   background-color: var(--panel-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
 }
 .chat-header {
   display: flex;
@@ -222,16 +343,6 @@ function handleLogout() {
   align-items: center;
   flex-shrink: 0;
 }
-.avatar-pic {
-  font-size: 32px;
-  width: 45px;
-  height: 45px;
-  background-color: var(--primary-light);
-  border-radius: 50%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
 .ai-details h3 {
   font-size: 17px;
   font-weight: 600;
@@ -242,66 +353,23 @@ function handleLogout() {
   margin-top: 3px;
   display: inline-block;
 }
-.messages-area {
-  flex: 1;
-  padding: 25px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+.active-mode-tag {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-weight: 500;
 }
-.msg-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  max-width: 80%;
+.active-mode-tag.incognito {
+  background-color: #F4ECF7;
+  color: #7D3C98;
+  border: 1px solid #E8DAEF;
+  animation: pulse-border 2s infinite;
 }
-.msg-row.ai {
-  align-self: flex-start;
-}
-.msg-row.user {
-  align-self: flex-end;
-}
-.msg-avatar-svg {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  flex-shrink: 0;
-}
-.msg-avatar {
-  font-size: 24px;
-  width: 36px;
-  height: 36px;
-  background-color: var(--primary-light);
-  border-radius: 50%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-.msg-bubble {
-  padding: 14px 18px;
-  border-radius: var(--radius-md);
-  font-size: 14.5px;
-  line-height: 1.5;
-  box-shadow: 0 4px 15px rgba(0,0,0,0.02);
-}
-.ai-bubble {
-  background-color: var(--primary-light);
-  border-top-left-radius: 4px;
-  border: 1px solid var(--border-color);
-}
-.user-bubble {
-  background-color: var(--accent-light);
-  border-top-right-radius: 4px;
-  border: 1px solid var(--accent);
-}
-.input-area {
-  padding: 20px 25px;
-  border-top: 1px solid var(--border-color);
-  display: flex;
-  gap: 15px;
-}
-.send-btn {
-  padding: 10px 24px;
+
+@keyframes pulse-border {
+  0% { border-color: rgba(125, 60, 152, 0.2); }
+  50% { border-color: rgba(125, 60, 152, 0.6); }
+  100% { border-color: rgba(125, 60, 152, 0.2); }
 }
 </style>

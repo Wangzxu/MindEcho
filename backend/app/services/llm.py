@@ -1,10 +1,26 @@
 # -*- coding: utf-8 -*-
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Literal
 from config import Config
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 定义结构化输出的 Pydantic 模型
+class IntentResponse(BaseModel):
+    intent: Literal["KNOWLEDGE", "EMOTION"] = Field(description="意图分类结果，必须是 KNOWLEDGE（科普咨询）或 EMOTION（情绪宣泄闲聊）之一")
+    reason: str = Field(description="分类的理由说明")
+
+class MeaningfulResponse(BaseModel):
+    is_meaningful: bool = Field(description="是否包含具体心理感受、生活烦恼、人际困扰或具有心理学分析价值的信息")
+
+class UserProfileResponse(BaseModel):
+    nickname: str = Field(description="用户昵称")
+    core_stressors: List[str] = Field(description="核心压力源列表")
+    effective_coping_methods: List[str] = Field(description="历史有效应对方法列表")
+    entity_relation_map: Dict[str, str] = Field(description="关键人际关系网络字典")
 
 class SiliconFlowService:
     """基于 LangChain 的硅基流动 (SiliconFlow) 大模型服务封装"""
@@ -21,6 +37,11 @@ class SiliconFlowService:
         self.simple_chat_client = None
         self.complex_chat_client = None
         self.summary_chat_client = None
+        
+        # 结构化输出包装客户端
+        self.intent_classifier = None
+        self.meaningful_judge = None
+        self.profile_extractor = None
         
         # 自动执行初始化
         self.init_service()
@@ -40,6 +61,9 @@ class SiliconFlowService:
             self.simple_chat_client = None
             self.complex_chat_client = None
             self.summary_chat_client = None
+            self.intent_classifier = None
+            self.meaningful_judge = None
+            self.profile_extractor = None
         else:
             try:
                 # 初始化 LangChain 向量嵌入客户端
@@ -55,8 +79,7 @@ class SiliconFlowService:
                     model=self.simple_model,
                     api_key=self.api_key,
                     base_url=self.base_url,
-                    temperature=0.0,
-                    max_tokens=60
+                    temperature=0.0
                 )
                 
                 # 初始化流式生成大模型
@@ -77,6 +100,11 @@ class SiliconFlowService:
                     max_tokens=1024
                 )
                 
+                # 绑定结构化输出约束包装器
+                self.intent_classifier = self.simple_chat_client.with_structured_output(IntentResponse)
+                self.meaningful_judge = self.simple_chat_client.with_structured_output(MeaningfulResponse)
+                self.profile_extractor = self.simple_chat_client.with_structured_output(UserProfileResponse)
+                
                 logger.info("SiliconFlow LangChain 客户端群组初始化成功。")
             except Exception as e:
                 logger.error(f"SiliconFlow LangChain 客户端群组初始化失败: {str(e)}")
@@ -84,6 +112,9 @@ class SiliconFlowService:
                 self.simple_chat_client = None
                 self.complex_chat_client = None
                 self.summary_chat_client = None
+                self.intent_classifier = None
+                self.meaningful_judge = None
+                self.profile_extractor = None
 
     def _convert_to_lc_messages(self, messages):
         """将原生的角色/文本词典结构列表转换为 LangChain 的 Message 对象列表"""
@@ -100,16 +131,13 @@ class SiliconFlowService:
         return lc_msgs
 
     def get_embedding(self, text):
-        """
-        利用 LangChain OpenAIEmbeddings 获取文本向量 (Embedding)
-        """
+        """利用 LangChain OpenAIEmbeddings 获取文本向量 (Embedding)"""
         if not self.embeddings_client:
             logger.warning(f"运行于 Mock 向量模型模式，返回 1024 维全零向量 (输入文本: {text[:20]}...)")
             logger.info("成功完成向量数据库嵌入提醒 (Mock 模式)！")
             return [0.0] * 1024
 
         try:
-            # embed_query 接收单个字符串并生成它的 Embedding
             embedding = self.embeddings_client.embed_query(text)
             logger.info(f"成功完成向量数据库嵌入提醒！模型: {self.embedding_model}，输入长度: {len(text)}，向量维度: {len(embedding)}")
             return embedding
@@ -117,23 +145,69 @@ class SiliconFlowService:
             logger.error(f"获取向量失败 ({self.embedding_model}): {str(e)}")
             return [0.0] * 1024
 
-    def call_simple_model(self, messages, temperature=0.0, max_tokens=100):
-        """
-        利用 LangChain ChatOpenAI 唤起轻量分类模型进行意图路由。
-        """
-        if not self.simple_chat_client:
-            logger.warning("运行于 Mock 简单模型模式。")
+    def classify_intent(self, messages) -> dict:
+        """使用结构化输出对用户意图进行分类"""
+        if not self.intent_classifier:
             last_msg = messages[-1]["content"] if messages else ""
             if any(word in last_msg for word in ["死", "自杀", "跳楼", "吞药"]):
-                return '{"intent": "CRISIS", "reason": "模拟检测：匹配到危机敏感词"}'
+                return {"intent": "CRISIS", "reason": "模拟检测：匹配到危机敏感词"}
             elif any(word in last_msg for word in ["什么是", "科普", "技巧", "怎么"]):
-                return '{"intent": "KNOWLEDGE", "reason": "模拟检测：提问心理概念"}'
+                return {"intent": "KNOWLEDGE", "reason": "模拟检测：提问心理概念"}
             else:
-                return '{"intent": "EMOTION", "reason": "模拟检测：日常情感倾诉"}'
+                return {"intent": "EMOTION", "reason": "模拟检测：日常情感倾诉"}
+        
+        try:
+            lc_msgs = self._convert_to_lc_messages(messages)
+            res = self.intent_classifier.invoke(lc_msgs)
+            return {"intent": res.intent, "reason": res.reason}
+        except Exception as e:
+            logger.error(f"结构化意图分类调用失败: {str(e)}")
+            return {"intent": "EMOTION", "reason": "接口异常降级"}
+
+    def judge_meaningful(self, messages) -> bool:
+        """使用结构化输出判断消息是否有心理学分析价值"""
+        if not self.meaningful_judge:
+            return True
+            
+        try:
+            lc_msgs = self._convert_to_lc_messages(messages)
+            res = self.meaningful_judge.invoke(lc_msgs)
+            return res.is_meaningful
+        except Exception as e:
+            logger.error(f"结构化特征评估调用失败: {str(e)}")
+            return False
+
+    def extract_profile(self, messages) -> dict:
+        """使用结构化输出提取/合并用户画像特征"""
+        if not self.profile_extractor:
+            return {
+                "nickname": "同学",
+                "core_stressors": ["学业压力"],
+                "effective_coping_methods": ["情绪宣泄"],
+                "entity_relation_map": {}
+            }
+            
+        try:
+            lc_msgs = self._convert_to_lc_messages(messages)
+            res = self.profile_extractor.invoke(lc_msgs)
+            return {
+                "nickname": res.nickname,
+                "core_stressors": res.core_stressors,
+                "effective_coping_methods": res.effective_coping_methods,
+                "entity_relation_map": res.entity_relation_map
+            }
+        except Exception as e:
+            logger.error(f"结构化画像提取调用失败: {str(e)}")
+            return {}
+
+    def call_simple_model(self, messages, temperature=0.0, max_tokens=100):
+        """利用 LangChain ChatOpenAI 唤起轻量分类模型（向下兼容）"""
+        if not self.simple_chat_client:
+            logger.warning("运行于 Mock 简单模型模式。")
+            return "{}"
 
         try:
             lc_msgs = self._convert_to_lc_messages(messages)
-            # 使用 LangChain 的 invoke 方法直接调用
             response = self.simple_chat_client.invoke(
                 input=lc_msgs,
                 temperature=temperature,
@@ -145,9 +219,7 @@ class SiliconFlowService:
             raise e
 
     def call_complex_model_stream(self, messages, temperature=0.7, max_tokens=1024):
-        """
-        利用 LangChain ChatOpenAI.stream 唤起生成回复大模型，输出流式迭代生成器。
-        """
+        """利用 LangChain ChatOpenAI.stream 唤起生成回复大模型，输出流式迭代生成器"""
         if not self.complex_chat_client:
             logger.warning("运行于 Mock 复杂模型流式模式。")
             mock_reply = "【模拟回复】你好！听到你分享你的感受，我在这里陪着你。这是一个没有配置 SiliconFlow API 密钥的模拟回复，如果需要真实对话，请在 .env 中配置有效的秘钥和模型。"
@@ -158,7 +230,6 @@ class SiliconFlowService:
 
         try:
             lc_msgs = self._convert_to_lc_messages(messages)
-            # 使用 LangChain 的 stream 方法，迭代返回 Chunk 内容
             response_stream = self.complex_chat_client.stream(
                 input=lc_msgs,
                 temperature=temperature,
@@ -176,12 +247,10 @@ class SiliconFlowService:
             raise e
 
     def call_summary_model(self, messages, temperature=0.3, max_tokens=1024):
-        """
-        利用 LangChain ChatOpenAI 唤起推理大模型进行总结。
-        """
+        """利用 LangChain ChatOpenAI 唤起推理大模型进行总结"""
         if not self.summary_chat_client:
             logger.warning("运行于 Mock 总结模型模式。")
-            return "【模拟总结】用户本次主要倾诉了期末备考引发的学业焦虑。有效的方法是“蝴蝶抱抱法”。画像中已同步此压力源。"
+            return "【模拟总结】用户本次主要倾诉了期末备考引发的学业焦虑。画像中已同步此压力源。"
 
         try:
             lc_msgs = self._convert_to_lc_messages(messages)
