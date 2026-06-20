@@ -152,7 +152,7 @@
           :class="['mode-btn', { active: importMode === 'file' }]"
           @click="importMode = 'file'"
         >
-          📁 拖拽上传文件 (PDF/TXT/Word)
+          📁 拖拽上传文件 (PDF/TXT/Word/Markdown)
         </button>
         <button 
           :class="['mode-btn', { active: importMode === 'manual' }]"
@@ -173,15 +173,15 @@
         >
           <div class="drag-info">
             <span class="upload-icon">📄</span>
-            <p v-if="!selectedFile">将 PDF、TXT、Word 文档拖到这里，或点击选择文件</p>
+            <p v-if="!selectedFile">将 PDF、TXT、Word、Markdown 文档拖到这里，或点击选择文件</p>
             <p v-else class="selected-file-name">已选择: <strong>{{ selectedFile.name }}</strong> ({{ (selectedFile.size / 1024).toFixed(1) }} KB)</p>
-            <span class="format-tip">仅支持 .pdf, .txt, .docx 格式，大小不超过 10MB</span>
+            <span class="format-tip">仅支持 .pdf, .txt, .docx, .md 格式，大小不超过 10MB</span>
           </div>
           <input 
             type="file" 
             ref="fileInputRef" 
             class="hidden-file-input" 
-            accept=".pdf,.txt,.docx"
+            accept=".pdf,.txt,.docx,.md"
             @change="handleFileSelect"
           />
         </div>
@@ -583,10 +583,10 @@ function handleFileDrop(e) {
   if (files && files.length > 0) {
     const file = files[0]
     const ext = file.name.split('.').pop().toLowerCase()
-    if (['pdf', 'txt', 'docx'].includes(ext)) {
+    if (['pdf', 'txt', 'docx', 'md'].includes(ext)) {
       selectedFile.value = file
     } else {
-      emit('show-toast', '仅支持 .pdf, .txt, .docx 格式的文档哦~', 'warning')
+      emit('show-toast', '仅支持 .pdf, .txt, .docx, .md 格式的文档哦~', 'warning')
     }
   }
 }

@@ -46,7 +46,8 @@ class SiliconFlowService:
                 self.embeddings_client = OpenAIEmbeddings(
                     model=self.embedding_model,
                     api_key=self.api_key,
-                    base_url=self.base_url
+                    base_url=self.base_url,
+                    check_embedding_ctx_length=False
                 )
                 
                 # 初始化轻量级分类大模型

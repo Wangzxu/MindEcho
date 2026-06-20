@@ -471,9 +471,9 @@ class ManualKnowledgeCreate(BaseModel):
 
 
 @admin_bp.post("/safety-seeds", response_model=Result[dict])
-def add_safety_seed(data: SafetySeedCreate):
+def add_safety_seed(data: SafetySeedCreate, db: Session = Depends(get_db)):
     """
-    添加安全预警 RAG 向量种子句到 ChromaDB (safety_warnings_kb 集合)
+    添加安全预警 RAG 向量种子句到 MySQL 并在 ChromaDB (safety_warnings_kb 集合) 中建索引
     """
     text = data.text.strip()
     seed_type = data.type.strip()
@@ -483,46 +483,87 @@ def add_safety_seed(data: SafetySeedCreate):
         raise HTTPException(status_code=400, detail="类型必须为 high_risk 或 violation")
         
     try:
+        from app.models.safety_warning_sample import SafetyWarningSample
+        # 1. 检查 MySQL 中是否已存在
+        existing = db.query(SafetyWarningSample).filter(SafetyWarningSample.text == text).first()
+        if existing:
+            if not existing.is_enabled:
+                # 如果存在但未启用，则重新启用它
+                existing.is_enabled = True
+                existing.sample_type = seed_type
+                db.commit()
+            else:
+                raise HTTPException(status_code=400, detail="该预警向量句已存在，请勿重复添加")
+        else:
+            # 2. 保存到 MySQL 数据库中以作持久化备份（同步火种）
+            new_sample = SafetyWarningSample(
+                text=text,
+                sample_type=seed_type,
+                is_enabled=True
+            )
+            db.add(new_sample)
+            db.commit()
+            db.refresh(new_sample)
+
+        # 3. 实时写入 ChromaDB
         query_vector = llm_service.get_embedding(text)
         collection = vector_db.get_collection("safety_warnings_kb")
-        seed_id = str(uuid.uuid4())
+        
+        # 使用固定的 ID 前缀方便识别
+        db_sample = db.query(SafetyWarningSample).filter(SafetyWarningSample.text == text).first()
+        seed_id = f"db_sample_{db_sample.id}"
+        
         collection.add(
             ids=[seed_id],
             embeddings=[query_vector],
-            metadatas=[{"type": seed_type, "text": text}],
+            metadatas=[{"type": seed_type, "text": text, "db_id": db_sample.id}],
             documents=[text]
         )
-        logger.info(f"成功将安全预警 RAG 种子句写入 ChromaDB (ID: {seed_id})")
-        return Result.success(data={"id": seed_id}, message="成功导入 ChromaDB")
+        logger.info(f"成功将安全预警 RAG 种子句同步写入 MySQL 与 ChromaDB (ID: {seed_id})")
+        return Result.success(data={"id": seed_id}, message="成功导入数据库与 ChromaDB")
+    except HTTPException:
+        raise
     except Exception as e:
+        db.rollback()
         logger.error(f"导入安全预警 RAG 种子句失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
 
 
 @admin_bp.get("/safety-seeds", response_model=Result[list[SafetySeedResponse]])
-def get_safety_seeds():
+def get_safety_seeds(db: Session = Depends(get_db)):
     """
-    获取 ChromaDB 中已生效的预警向量样本列表
+    获取 MySQL 中已生效的预警向量样本列表
     """
     try:
-        collection = vector_db.get_collection("safety_warnings_kb")
-        results = collection.get()
+        from app.models.safety_warning_sample import SafetyWarningSample
+        # 直接从可信 MySQL 数据库拉取
+        samples = db.query(SafetyWarningSample).filter(SafetyWarningSample.is_enabled == True).all()
         
         seeds = []
-        if results and results.get("ids"):
-            ids = results["ids"]
-            metadatas = results["metadatas"]
-            for idx, sid in enumerate(ids):
-                meta = metadatas[idx] or {}
-                seeds.append(SafetySeedResponse(
-                    id=sid,
-                    type=meta.get("type", "high_risk"),
-                    text=meta.get("text", "")
-                ))
+        for s in samples:
+            seeds.append(SafetySeedResponse(
+                id=f"db_sample_{s.id}",
+                type=s.sample_type,
+                text=s.text
+            ))
         return Result.success(data=seeds, message="获取预警向量样本成功")
     except Exception as e:
         logger.error(f"获取预警向量样本失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@admin_bp.post("/safety-seeds/sync", response_model=Result[dict])
+def sync_safety_seeds(db: Session = Depends(get_db)):
+    """
+    手动触发将 MySQL 里的安全预警样本重新生成向量并同步写入 ChromaDB (常用于更换向量模型后重建索引)
+    """
+    try:
+        from app.database.mysql import sync_warning_samples_to_vector_db
+        sync_warning_samples_to_vector_db()
+        return Result.success(message="安全预警向量库同步重构成功")
+    except Exception as e:
+        logger.error(f"手动触发同步预警向量库异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"同步重构失败: {str(e)}")
 
 
 @admin_bp.post("/knowledge/manual", response_model=Result[dict])

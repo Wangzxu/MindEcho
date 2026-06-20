@@ -70,6 +70,33 @@ def seed_safety_keywords_from_list():
         db.close()
 
 
+def seed_safety_warning_samples_from_list():
+    """
+    自默认 Python 列表向数据库 safety_warning_samples 表初始化填充数据（仅当表中无数据时生效）
+    """
+    db = SessionLocal()
+    try:
+        from app.models.safety_warning_sample import SafetyWarningSample
+        if db.query(SafetyWarningSample).count() == 0:
+            default_samples = [
+                {"text": "好像离开这个世界啊", "sample_type": "high_risk"},
+                {"text": "卖片，裸聊加我进群", "sample_type": "violation"}
+            ]
+            for s in default_samples:
+                db.add(SafetyWarningSample(
+                    text=s["text"],
+                    sample_type=s["sample_type"],
+                    is_enabled=True
+                ))
+            db.commit()
+            logger.info("已成功将默认安全预警 RAG 向量种子样本导入数据库。")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"从默认列表初始化导入安全预警向量样本数据异常: {str(e)}")
+    finally:
+        db.close()
+
+
 def init_mysql():
     """
     在应用启动时初始化并建表
@@ -77,15 +104,71 @@ def init_mysql():
     try:
         # 创建所有表（如果它们不存在的话）
         # 注意：需要在此处导入所有 model，否则 create_all 不会生效
-        from app.models import User, UserProfile, ChatSession, ChatMessage, KnowledgeImport, SafetyKeyword, SecurityActivityLog
+        from app.models import User, UserProfile, ChatSession, ChatMessage, KnowledgeImport, SafetyKeyword, SecurityActivityLog, SafetyWarningSample
         Base.metadata.create_all(bind=engine)
         logger.info("MySQL 数据库表结构同步完成。")
         seed_safety_keywords_from_list()
+        seed_safety_warning_samples_from_list()
         
         # 导入内存热加载服务并运行热更新
         from app.services.intent import intent_service
         intent_service.load_safety_rules()
     except Exception as e:
         logger.error(f"MySQL 数据库表初始化建表失败: {str(e)}")
+
+
+def sync_warning_samples_to_vector_db():
+    """
+    将 MySQL 中的所有活跃预警向量样本同步到 ChromaDB 的 safety_warnings_kb 集合中
+    """
+    db = SessionLocal()
+    try:
+        from app.models.safety_warning_sample import SafetyWarningSample
+        from app.database.vector import vector_db
+        from app.services.llm import llm_service
+
+        logger.info("开始从 MySQL 同步安全预警 RAG 向量样本到 ChromaDB...")
+        
+        # 1. 获取所有启用中的样本
+        samples = db.query(SafetyWarningSample).filter(SafetyWarningSample.is_enabled == True).all()
+        
+        # 2. 获取 ChromaDB 集合
+        collection = vector_db.get_collection("safety_warnings_kb")
+        
+        # 3. 清空原有 ChromaDB 数据以防残留或因模型切换引起的冲突
+        results = collection.get()
+        if results and results.get("ids"):
+            collection.delete(ids=results["ids"])
+            logger.info(f"已清空 ChromaDB 中的旧预警向量数据，共 {len(results['ids'])} 条记录。")
+
+        if not samples:
+            logger.info("MySQL 中无活跃预警样本，同步结束。")
+            return
+
+        # 4. 重新计算向量并写入 ChromaDB
+        ids = []
+        embeddings = []
+        metadatas = []
+        documents = []
+
+        for s in samples:
+            # 文本向量化
+            vec = llm_service.get_embedding(s.text)
+            ids.append(f"db_sample_{s.id}")
+            embeddings.append(vec)
+            metadatas.append({"type": s.sample_type, "text": s.text, "db_id": s.id})
+            documents.append(s.text)
+
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            documents=documents
+        )
+        logger.info(f"成功同步 {len(samples)} 个安全预警 RAG 向量样本至 ChromaDB！")
+    except Exception as e:
+        logger.error(f"同步预警 RAG 向量到 ChromaDB 发生异常: {str(e)}")
+    finally:
+        db.close()
 
         # 捕获异常，方便在无数据库环境下的开发测试

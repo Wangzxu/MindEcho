@@ -30,6 +30,13 @@ async def lifespan(app: FastAPI):
     
     # 3. 校验并载入硅基流动大模型客户端
     llm_service.init_service()
+
+    # 3.5 同步 MySQL 安全预警 RAG 向量样本到 ChromaDB (用于在更换嵌入模型时自动重建向量索引)
+    try:
+        from app.database.mysql import sync_warning_samples_to_vector_db
+        sync_warning_samples_to_vector_db()
+    except Exception as e:
+        logger.error(f"服务启动时同步预警向量样本失败: {str(e)}")
     
     # 4. 初始化对象存储服务 (MinIO)
     from app.services.storage import storage_service

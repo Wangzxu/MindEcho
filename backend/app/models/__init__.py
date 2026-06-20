@@ -6,6 +6,7 @@ from app.models.message import ChatMessage
 from app.models.knowledge import KnowledgeImport
 from app.models.safety_keyword import SafetyKeyword
 from app.models.security_activity_log import SecurityActivityLog
+from app.models.safety_warning_sample import SafetyWarningSample
 
 __all__ = [
     "User", 
@@ -14,5 +15,6 @@ __all__ = [
     "ChatMessage", 
     "KnowledgeImport", 
     "SafetyKeyword", 
-    "SecurityActivityLog"
+    "SecurityActivityLog",
+    "SafetyWarningSample"
 ]

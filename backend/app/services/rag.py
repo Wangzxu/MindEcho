@@ -35,7 +35,7 @@ def extract_text_from_file(file: UploadFile, file_content: bytes) -> str:
     自上传的文件（TXT, PDF, Word）中提取文本内容，带依赖防崩溃隔离
     """
     filename = file.filename.lower()
-    if filename.endswith(".txt"):
+    if filename.endswith(".txt") or filename.endswith(".md"):
         return file_content.decode("utf-8", errors="ignore")
     elif filename.endswith(".pdf"):
         try:
@@ -68,7 +68,7 @@ def extract_text_from_file(file: UploadFile, file_content: bytes) -> str:
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Word 文档解析失败: {str(e)}")
     else:
-        raise HTTPException(status_code=400, detail="不支持的文件格式，仅支持 .txt, .pdf, .docx")
+        raise HTTPException(status_code=400, detail="不支持的文件格式，仅支持 .txt, .md, .pdf, .docx")
 
 
 class RAGService:
