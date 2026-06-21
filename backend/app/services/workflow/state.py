@@ -13,6 +13,12 @@ class ChatWorkflowState(TypedDict):
     intent: str  # CRISIS, KNOWLEDGE, EMOTION
     intent_reason: str
     
+    # 唯一缓存的用户输入向量 (避免多节点重复计算)
+    user_input_embedding: List[float] | None
+    
+    # 累计消息轮数计数器 (用于无痕会话等画像建模判定)
+    message_count: int | None
+    
     # 记忆系统的 5 部分装载
     recent_history: str             # 1. 6轮原始对话历史拼接字符串
     previous_summary: str           # 2. 其余轮次的历史摘要

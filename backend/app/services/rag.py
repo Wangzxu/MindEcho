@@ -105,7 +105,7 @@ class RAGService:
         db.refresh(task)
         return task
 
-    def search_knowledge(self, db: Session, query: str, limit=2):
+    def search_knowledge(self, db: Session, query: str, limit=2, query_vector=None):
         """
         云原生 RAG 检索：直接从 ChromaDB 检索返回 Chunks 文本段落
         无需从 MySQL 查询大文本原文，因为大文本段落已经自治存储在 Chroma 向量集合中。
@@ -113,7 +113,8 @@ class RAGService:
         cards = []
         try:
             # 1. 对查询进行向量化
-            query_vector = llm_service.get_embedding(query)
+            if query_vector is None:
+                query_vector = llm_service.get_embedding(query)
             
             # 2. 从 ChromaDB 检索文本块与元数据
             collection = vector_db.get_collection(self.collection_name)

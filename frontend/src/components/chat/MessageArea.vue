@@ -59,6 +59,24 @@
             </div>
           </div>
         </div>
+
+        <!-- 历史记忆召回展示 (若存在) -->
+        <div 
+          v-if="msg.sender === 'ai' && msg.recalledMemory && msg.recalledMemory !== '无'" 
+          class="memory-recall-section"
+        >
+          <div class="memory-section-header">🧠 往期倾诉线索召回：</div>
+          <div class="memory-cards-container">
+            <div 
+              v-for="(memo, mIndex) in getSplitMemories(msg.recalledMemory)" 
+              :key="mIndex" 
+              class="memory-card"
+            >
+              <span class="memory-card-icon">💭</span>
+              <p class="memory-card-text">“ {{ memo }} ”</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="msg.sender === 'user'" class="msg-avatar">👤</div>
@@ -120,6 +138,12 @@ function getIntentLabel(intentStr) {
     'EMOTION': '🍃 情绪宣泄共情'
   }
   return map[intentStr.toUpperCase()] || intentStr
+}
+
+// 拆分召回的历史记忆
+function getSplitMemories(recallStr) {
+  if (!recallStr || recallStr === '无') return []
+  return recallStr.split(' | ').filter(item => item.trim() !== '')
 }
 </script>
 
@@ -285,6 +309,47 @@ function getIntentLabel(intentStr) {
   padding: 4px 8px;
   border-radius: 4px;
   margin-top: 6px;
+}
+
+/* 记忆召回部分 */
+.memory-recall-section {
+  width: 100%;
+  max-width: 480px;
+  margin-top: 6px;
+  animation: fade-in 0.4s ease-out;
+}
+.memory-section-header {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  padding-left: 4px;
+}
+.memory-cards-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.memory-card {
+  background: rgba(253, 244, 243, 0.65);
+  backdrop-filter: blur(5px);
+  border: 1px solid rgba(232, 167, 161, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.01);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.memory-card-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.memory-card-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  font-style: italic;
 }
 
 @keyframes fade-in {

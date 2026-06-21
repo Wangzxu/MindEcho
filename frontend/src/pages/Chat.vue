@@ -205,7 +205,8 @@ async function sendMessage(content) {
     content: '',
     intent: '',
     reason: '',
-    ragCards: []
+    ragCards: [],
+    recalledMemory: ''
   })
   
   messages.value.push(aiMsg)
@@ -258,6 +259,7 @@ async function sendMessage(content) {
             aiMsg.intent = parsed.intent
             aiMsg.reason = parsed.reason || ''
             aiMsg.ragCards = parsed.rag_cards || []
+            aiMsg.recalledMemory = parsed.semantic_history_recall || ''
             
             // 捕获自动生成的会话标题并更新侧边栏
             if (parsed.new_title) {

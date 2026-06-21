@@ -21,11 +21,14 @@ anonymous_summaries_map = {}
 
 async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    网关级节点：完成安全词硬过滤 (Level 1) + 预警向量匹配 (Level 2) + 模型意图分类 (Level 3)
+    网关级节点：完成安全词硬过滤 (Level 1) + 大模型三分类意图识别 (Level 2) + 预警向量匹配 (Level 3)
     附加：
-    1. 判断用户消息是否具备心理学特征值 (Meaningfulness Judge) 并做向量嵌入召回。
-    2. 更新用户消息的 intent 进 MySQL (非无痕会话)。
+    1. 判断用户消息是否具备心理学特征值 (Meaningfulness Judge) 并提取高维结构化记忆。
+    2. 对非 CRISIS 的输入进行单次向量嵌入缓存，供后续安全兜底、RAG 与历史召回共享。
+    3. 在写入前进行两阶段查重检测（直接距离拦截 + 灰色区间语义查重复核）。
+    4. 更新用户消息的 intent 进 MySQL (非无痕会话)。
     """
+    logger.info("=== [filter_and_route_node] 开始执行 ===")
     user_input = state["user_input"].strip()
     queue = config.get("configurable", {}).get("queue")
     user_msg_id = state.get("user_msg_id")
@@ -37,10 +40,12 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
     reason = ""
     log_type = None
     matched_rule = ""
+    user_input_embedding = None
     
     db = SessionLocal()
     try:
-        # Level 1: 本地敏感词硬匹配
+        # Level 1: 本地敏感词硬匹配 (不耗费 API)
+        logger.info("[filter_and_route_node] 正在执行 Level 1 硬过滤拦截...")
         keywords = db.query(SafetyKeyword).filter(SafetyKeyword.is_enabled == True).all()
         for kw in keywords:
             if kw.word in user_input:
@@ -51,13 +56,40 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                 matched_rule = f"命中敏感词: {kw.word}"
                 break
                 
-        # Level 2: 预警语义向量检索 (ChromaDB 检索)
+        # Level 2: 轻量大模型三分类意图识别 (KNOWLEDGE / EMOTION / CRISIS)
         if not intent:
+            logger.info("[filter_and_route_node] 正在执行 Level 2 意图三分类...")
+            classifier_messages = [
+                {"role": "system", "content": (
+                    "你是一个校园心理咨询系统的路由网关。请分析用户的当前输入，并将其精确分类为以下三类之一：\n"
+                    "- \"KNOWLEDGE\": 用户在提问具体的心理学概念、自助方法（例如CBT、蝴蝶抱抱法）或查询学校心理咨询中心的信息。\n"
+                    "- \"EMOTION\": 用户在进行倾诉、分享生活困扰（如考试挂科、科研不顺、室友关系差、失恋等），或进行日常打招呼、闲聊等互动。\n"
+                    "- \"CRISIS\": 用户表达了自残、自杀倾向，或者有严重的暴力倾向、绝望自毁心理。"
+                )},
+                {"role": "user", "content": user_input}
+            ]
+
             try:
-                query_vector = llm_service.get_embedding(user_input)
+                logger.info("[filter_and_route_node] 准备调用 llm_service.classify_intent...")
+                res_json = llm_service.classify_intent(classifier_messages)
+                intent = res_json.get("intent", "EMOTION")
+                reason = res_json.get("reason", "模型意图分类")
+                logger.info(f"[filter_and_route_node] classify_intent 调用成功: intent={intent}, reason={reason}")
+            except Exception as le:
+                logger.error(f"大模型结构化意图分类调用失败: {le}")
+                intent = "EMOTION"
+                reason = "分类接口异常降级"
+
+        # Level 3: 预警语义向量检索 (ChromaDB 检索) -> 仅对非 CRISIS 的输入进行单次向量嵌入并作为兜底安全防线
+        if intent != "CRISIS":
+            logger.info("[filter_and_route_node] 正在执行 Level 3 预警向量库检索...")
+            try:
+                logger.info("[filter_and_route_node] 准备调用 llm_service.get_embedding 获取输入向量...")
+                user_input_embedding = llm_service.get_embedding(user_input)
+                logger.info("[filter_and_route_node] get_embedding 成功")
                 collection = vector_db.get_collection("safety_warnings_kb")
                 results = collection.query(
-                    query_embeddings=[query_vector],
+                    query_embeddings=[user_input_embedding],
                     n_results=1
                 )
                 if results and results.get("distances") and len(results["distances"][0]) > 0:
@@ -65,52 +97,31 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                     similarity = 1.0 - distance
                     if similarity > 0.85:  # 余弦相似度大于 0.85
                         matched_text = results["documents"][0][0]
-                        logger.info(f"触发预警向量库语义相似匹配: {matched_text}, 相似度: {similarity:.2f}")
+                        logger.info(f"触发预警向量库语义相似匹配兜底: {matched_text}, 相似度: {similarity:.2f}")
                         intent = "CRISIS"
-                        reason = f"语义相似度匹配危机样本: {matched_text} ({similarity*100:.1f}%)"
+                        reason = f"语义相似度匹配危机样本兜底: {matched_text} ({similarity*100:.1f}%)"
                         
                         matched_type = "high_risk"
                         if results.get("metadatas") and len(results["metadatas"][0]) > 0:
                             matched_type = results["metadatas"][0][0].get("type", "high_risk")
                         
                         log_type = matched_type
-                        matched_rule = f"预警语义匹配: {matched_text} (相似度: {similarity:.2f})"
+                        matched_rule = f"预警语义匹配兜底: {matched_text} (相似度: {similarity:.2f})"
             except Exception as ve:
                 logger.error(f"预警向量库语义检索异常: {ve}")
-
-        # Level 3: 轻量大模型二分类 (KNOWLEDGE / EMOTION)
-        if not intent:
-            classifier_messages = [
-                {"role": "system", "content": (
-                    "你是一个校园心理咨询系统的路由网关。请分析用户的当前输入，并将其精确分类为以下两类之一：\n"
-                    "- \"KNOWLEDGE\": 用户在提问具体的心理学概念、自助方法（例如CBT、蝴蝶抱抱法）或查询学校心理咨询中心的信息。\n"
-                    "- \"EMOTION\": 用户在进行倾诉、分享生活困扰（如考试挂科、科研不顺、室友关系差、失恋等），或进行日常打招呼、闲聊等互动。\n\n"
-                    "【约束条件】\n"
-                    "必须仅返回符合以下 Schema 的有效 JSON 串。不要包裹任何 Markdown 标记 (如 ```json) 且不要包含任何解释性文字：\n"
-                    '{"intent": "KNOWLEDGE" | "EMOTION", "reason": "分类理由"}'
-                )},
-                {"role": "user", "content": user_input}
-            ]
-
-            try:
-                res_json = llm_service.classify_intent(classifier_messages)
-                intent = res_json.get("intent", "EMOTION")
-                reason = res_json.get("reason", "模型意图分类")
-            except Exception as le:
-                logger.error(f"大模型结构化意图分类调用失败: {le}")
-                intent = "EMOTION"
-                reason = "分类接口异常降级"
 
         # 自动生成会话标题 (若是默认的初始化标题，根据首条消息提炼并更新)
         new_title = None
         session = None
         try:
+            logger.info("[filter_and_route_node] 准备更新/概括会话标题...")
             session = db.query(ChatSession).get(session_id)
             if session and session.title in ["新对话", "无痕新对话"]:
                 title_prompt = [
                     {"role": "system", "content": "你是一个会话标题生成器。请根据用户的输入，生成一个简短、概括性的会话标题（不超过 8 个字），不要包含任何标点符号、两边引号或任何解释性文字。"},
                     {"role": "user", "content": user_input}
                 ]
+                logger.info("[filter_and_route_node] 准备调用 llm_service.call_simple_model 生成标题...")
                 generated_title = llm_service.call_simple_model(title_prompt, temperature=0.3, max_tokens=20)
                 generated_title = generated_title.strip().replace('"', '').replace("'", "").replace("“", "").replace("”", "")
                 if generated_title:
@@ -149,38 +160,76 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                 db.rollback()
                 logger.error(f"写入安全事件日志异常: {dbe}")
 
-        # C. 过滤无意义日常闲聊与语气词，判断是否需要嵌入该条聊天记录为语义召回
+        # C. 过滤无意义日常闲聊与语气词，并提取结构化记忆，判断是否需要嵌入该条聊天记录为语义召回
         # 仅针对登录用户 (current_user_id 存在)
         if intent != "CRISIS" and current_user_id:
+            logger.info("[filter_and_route_node] 准备评估并提取有心理分析价值的结构化记忆...")
             try:
-                judge_messages = [
+                memory_messages = [
                     {"role": "system", "content": (
-                        "你是一个心理咨询系统的特征分析网关。请分析以下用户的输入，判断其是否包含具体的心理感受、生活烦恼、人际困扰或具有心理学分析价值的信息。\n"
-                        "如果是，请返回 JSON: {\"is_meaningful\": true}；\n"
-                        "如果只是无意义的日常问候、单字回复、道谢或告别（例如：‘你好’、‘谢谢’、‘哦’、‘好吧’、‘拜拜’），请返回 JSON: {\"is_meaningful\": false}。\n"
-                        "必须仅返回有效 JSON，不要包裹任何 Markdown 标记或文字。"
+                        "你是一个心理咨询系统的特征分析网关。请分析用户的当前输入，判断其是否包含具体的、有长期存储和后续追踪价值的个人背景、生活细节、生活事件、人际关系或应对行为特征。\n"
+                        "【过滤标准】若用户仅是进行单纯的情绪宣泄发泄（如‘我好难过’、‘我好烦’、‘开心’、‘太垃圾了’）或日常闲聊问候（如‘你好’、‘在吗’），而没有透露任何具体的背景事件或细节，必须判定为 is_valuable 为 false。\n"
+                        "如果 is_valuable 为 true，请将提取的细节提炼并拼接为适合回忆的客观陈述（格式：‘【涉及主体】xxx 【核心事件】xxx 【心理感受】xxx 【相关细节】xxx 【应对方式】xxx’）。如果 is_valuable 为 false，recalled_text 请填空字符串。"
                     )},
                     {"role": "user", "content": user_input}
                 ]
-                is_meaningful = llm_service.judge_meaningful(judge_messages)
+                logger.info("[filter_and_route_node] 准备调用 llm_service.extract_structured_memory...")
+                extracted_mem = llm_service.extract_structured_memory(memory_messages)
+                logger.info(f"[filter_and_route_node] extract_structured_memory 成功: is_valuable={extracted_mem.is_valuable}")
                 
-                if is_meaningful:
-                    logger.info(f"经评估该用户输入具备心理特征分析价值，写入 ChromaDB 用户专属语义记忆库")
-                    embedding_vector = llm_service.get_embedding(user_input)
-                    collection = vector_db.get_collection("user_history_recall_kb")
-                    
-                    import uuid
-                    collection.add(
-                        embeddings=[embedding_vector],
-                        documents=[user_input],
-                        ids=[str(uuid.uuid4())],
-                        metadatas=[{"user_id": current_user_id, "session_id": session_id}]
-                    )
+                if extracted_mem.is_valuable:
+                    recalled_text = extracted_mem.recalled_text.strip()
+                    if recalled_text:
+                        logger.info(f"经评估该用户输入具备心理特征分析价值。提炼事件: {extracted_mem.recalled_text}")
+                        
+                        # 生成提炼文本的向量嵌入
+                        logger.info("[filter_and_route_node] 准备生成记忆提炼文本的向量嵌入...")
+                        embedding_vector = llm_service.get_embedding(recalled_text)
+                        collection = vector_db.get_collection("user_history_recall_kb")
+                        
+                        # 检查向量数据库中是否存在相似的历史记录，防重 (查询 top 3)
+                        results = collection.query(
+                            query_embeddings=[embedding_vector],
+                            n_results=3,
+                            where={"user_id": current_user_id}
+                        )
+                        is_duplicate = False
+                        if results and results.get("distances") and len(results["distances"][0]) > 0:
+                            distances = results["distances"][0]
+                            documents = results["documents"][0]
+                            min_distance = distances[0]
+                            
+                            # 阶段一：若向量距离极其接近，直接拦截
+                            if min_distance < 0.15:
+                                is_duplicate = True
+                                logger.info(f"检测到极高相似度的往期记忆 (向量距离: {min_distance:.4f})，直接跳过写入。")
+                            # 阶段二：若向量距离在灰色区间，启动大模型进行语义查重复核
+                            elif min_distance < 0.45:
+                                logger.info(f"检测到相似往期记忆候选 (最小距离: {min_distance:.4f})，启动大模型语义查重复核...")
+                                existing_candidates = documents[:3]
+                                is_duplicate = llm_service.check_memory_duplicate(recalled_text, existing_candidates)
+                                if is_duplicate:
+                                    logger.info(f"大模型判定新记忆与已有历史记忆语义重复，跳过写入。")
+                        
+                        if not is_duplicate:
+                            import uuid
+                            collection.add(
+                                embeddings=[embedding_vector],
+                                documents=[recalled_text],
+                                ids=[str(uuid.uuid4())],
+                                metadatas=[{
+                                    "user_id": current_user_id, 
+                                    "session_id": session_id,
+                                    "recalled_text": extracted_mem.recalled_text
+                                }]
+                            )
+                            logger.info(f"成功将提炼后的检索句写入 ChromaDB 用户专属语义记忆库: '{recalled_text}'")
             except Exception as e:
                 logger.error(f"评估并嵌入用户聊天记录异常: {e}")
 
         # D. 将元数据事件推入队列 (CRISIS 分支直接在此处推入)
         if intent == "CRISIS" and queue:
+            logger.info("[filter_and_route_node] 触发危机分支，将危机元数据放入队列...")
             await queue.put({
                 "type": "metadata", 
                 "data": {
@@ -198,7 +247,8 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
         return {
             "intent": intent, 
             "intent_reason": reason,
-            "history_messages": history
+            "history_messages": history,
+            "user_input_embedding": user_input_embedding
         }
     finally:
         db.close()
@@ -254,7 +304,9 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
                 
             # 语义召回线索 (ChromaDB)
             try:
-                query_vector = llm_service.get_embedding(user_input)
+                query_vector = state.get("user_input_embedding")
+                if query_vector is None:
+                    query_vector = llm_service.get_embedding(user_input)
                 collection = vector_db.get_collection("user_history_recall_kb")
                 results = collection.query(
                     query_embeddings=[query_vector],
@@ -269,7 +321,10 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
         # 5. 专业 RAG 科普知识库检索
         rag_cards = []
         if intent == "KNOWLEDGE":
-            rag_cards = rag_service.search_knowledge(db, user_input, limit=2)
+            query_vector = state.get("user_input_embedding")
+            if query_vector is None:
+                query_vector = llm_service.get_embedding(user_input)
+            rag_cards = rag_service.search_knowledge(db, user_input, limit=2, query_vector=query_vector)
             logger.info(f"RAG 科普知识检索召回，条数: {len(rag_cards)}")
 
         # 核心元数据（意图标签 + 知识卡片）打包装入 SSE 队列通知前端
@@ -278,7 +333,8 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
                 "intent": intent,
                 "reason": state.get("intent_reason", "意图识别完成"),
                 "rag_cards": rag_cards,
-                "new_title": session.title if session else None
+                "new_title": session.title if session else None,
+                "semantic_history_recall": semantic_history_recall
             }
             await queue.put({"type": "metadata", "data": meta_event})
 
@@ -379,9 +435,12 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
         {"role": "user", "content": user_input}
     ]
 
+    logger.info("=== [standard_chat_node] 开始执行 ===")
     full_reply = ""
     try:
+        logger.info("[standard_chat_node] 正在发起流式回复请求...")
         response_stream = llm_service.call_complex_model_stream(messages, temperature=0.7)
+        logger.info("[standard_chat_node] 获取流式生成生成器成功，准备接收数据...")
         for chunk in response_stream:
             full_reply += chunk
             if queue:
@@ -431,14 +490,7 @@ async def update_profile_background(current_user_id: int, history_segment: List[
         profile_messages = [
             {"role": "system", "content": (
                 "你是一个心理特征画像提取专家。请基于用户目前的心理画像和最近的对话记录，提取并更新用户的心理特征。\n"
-                "请输出符合以下 JSON Schema 的结果，不要包裹 markdown 或其他文字：\n"
-                "{\n"
-                "  \"nickname\": \"用户昵称\",\n"
-                "  \"core_stressors\": [\"压力源1\", \"压力源2\"],\n"
-                "  \"effective_coping_methods\": [\"有效应对方法1\", \"有效应对方法2\"],\n"
-                "  \"entity_relation_map\": {\"人名/角色\": \"关系描述\"}\n"
-                "}\n"
-                "【注意】不要遗失之前已有的重要画像内容，仅做合并与更新。不需要包含任何解释性文本或 Markdown 代码块。"
+                "【注意】不要遗失之前已有的重要画像内容，仅做合并与更新。"
             )},
             {"role": "user", "content": f"【当前画像】:\n{json.dumps(current_profile_dict, ensure_ascii=False)}\n\n【最近对话】:\n{recent_chat_text}"}
         ]
@@ -488,7 +540,7 @@ async def compress_summary_background(session_id: str, to_compress_segment: List
         summary_messages = [
             {"role": "system", "content": (
                 "你是一个会话摘要总结专家。请结合已有的旧摘要和最近新发生的对话段落，将这些较老的对话细节以精简的客观心理学总结合并记录。\n"
-                "仅关注用户的压力源、情感转折以及心理变化，并保持总结简明扼要（300字以内）。不要输出任何额外的废话。"
+                "仅关注用户的压力源、情感转折以及心理变化，并保持总结简明扼要（150字以内）。不要输出任何额外的废话。"
             )},
             {"role": "user", "content": f"【往期历史摘要】:\n{old_summary}\n\n【最新已沉淀对话】:\n{compress_text}"}
         ]
@@ -529,6 +581,10 @@ async def save_message_node(state: ChatWorkflowState, config: RunnableConfig) ->
     current_user_id = state.get("current_user_id")
     history = list(state.get("history_messages", []))
 
+    # 更新并记录累计处理的消息数 (1条用户输入 + 1条AI回复)
+    message_count = state.get("message_count") or 0
+    message_count += 2
+
     db = SessionLocal()
     keep_window = None
     try:
@@ -549,21 +605,48 @@ async def save_message_node(state: ChatWorkflowState, config: RunnableConfig) ->
                 logger.error(f"持久化 AI 回复异常: {e}")
 
         # B. 轮数检查：每10轮 (20条消息) 进行一次个人特征画像建模（后台异步）
-        if current_user_id and len(history) >= 20 and len(history) % 20 == 0:
-            logger.info(f"当前会话已达 {len(history)} 条消息，触发后台异步个人特征画像建模...")
-            history_segment = list(history[-20:])
+        # 对常规会话，我们以数据库内真实持久化消息数为准，以防止重启导致计数重置；对无痕会话，我们以 state 里的累计消息数为准
+        total_messages = message_count
+        if not is_anonymous:
+            try:
+                db_msg_count = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).count()
+                if db_msg_count > 0:
+                    total_messages = db_msg_count
+            except Exception as e:
+                logger.error(f"查询数据库消息数出错，降级为 state 计数: {e}")
+
+        if current_user_id and total_messages >= 20 and total_messages % 20 == 0:
+            logger.info(f"当前会话累计已达 {total_messages} 条消息，触发后台异步个人特征画像建模...")
+            history_segment = []
+            if not is_anonymous:
+                try:
+                    # 常规会话：从 MySQL 加载最近 20 条消息，以防滑动窗口裁剪导致画像分析缺失细节
+                    db_msgs = db.query(ChatMessage).filter(
+                        ChatMessage.session_id == session_id
+                    ).order_by(ChatMessage.created_at.desc()).limit(20).all()
+                    db_msgs.reverse()
+                    history_segment = [{"sender": msg.sender, "content": msg.content} for msg in db_msgs]
+                except Exception as he:
+                    logger.error(f"加载画像建模最近消息历史失败: {he}")
+                    history_segment = list(history[-20:])
+            else:
+                # 无痕会话：由于数据库中没有消息，我们只能从 state 缓存中拿（最大为 12 条的滑动窗口）
+                history_segment = list(history[-20:])
+
             asyncio.create_task(update_profile_background(current_user_id, history_segment))
 
-        # C. 上下文压缩：当缓存中消息轮次超出 6 轮 (12 条消息)，触发滚动 Summary 压缩（后台异步）
-        if len(history) > 12:
+        # C. 上下文压缩：当缓存中消息轮次超出 10 轮 (20 条消息) 时，触发滚动 Summary 压缩（后台异步）
+        # 每次裁剪后仍保留最新的 6 轮 (12 条消息) 作为活跃上下文窗口，分批压缩以避免每轮都调用 LLM 造成资源浪费
+        if len(history) > 20:
             to_compress = list(history[:-12])
             keep_window = list(history[-12:])
-            logger.info(f"活跃会话已达 {len(history)} 条消息，裁剪状态窗口并触发后台滚动会话摘要压缩...")
+            logger.info(f"活跃会话已达 {len(history)} 条消息，裁剪状态窗口并触发后台分批滚动会话摘要压缩...")
             asyncio.create_task(compress_summary_background(session_id, to_compress, is_anonymous))
 
     finally:
         db.close()
 
+    return_dict = {"message_count": message_count}
     if keep_window is not None:
-        return {"history_messages": keep_window}
-    return {}
+        return_dict["history_messages"] = keep_window
+    return return_dict
