@@ -36,3 +36,4 @@ dist/
 # Scratch files & generated knowledge seeds
 scratch/
 psychology_knowledge_seed/
+backend/script/mindecho_chat.json
