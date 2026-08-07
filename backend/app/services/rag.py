@@ -16,7 +16,6 @@ RAG 知识库服务 — 统一 Markdown 管线版。
 
 import io
 import logging
-import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 
 from fastapi import UploadFile, HTTPException
@@ -118,27 +117,38 @@ def split_markdown_into_chunks(
 
     for section_key, parent_content in parent_sections.items():
         h1, h2 = section_key
-        # 先按 H3 边界子切分再对每个 H3 二级切分
-        section_chunks = char_splitter.split_text(parent_content)
-        for chunk_text in section_chunks:
-            # 从 chunk 文本中提取 H3（如果有）
-            h3 = ""
-            for line in chunk_text.split("\n"):
-                line_stripped = line.strip()
-                if line_stripped.startswith("### "):
-                    h3 = line_stripped[4:].strip()
-                    break
 
-            chunks.append({
-                "content": chunk_text.strip(),
-                "metadata": {
-                    "h1": h1,
-                    "h2": h2,
-                    "h3": h3,
-                    "section_id": f"sec_{section_counter}",
-                    "parent_content": parent_content.strip(),
-                }
-            })
+        # 按 H3 边界子切分：将 H2 父文档按 "### " 拆分为独立 H3 段，
+        # 再对每段做二级字符切分，确保 chunk 边界不跨 H3 标题
+        h3_segments = parent_content.split("\n### ")
+
+        for seg_idx, seg in enumerate(h3_segments):
+            if seg_idx == 0:
+                # 第一段：H1/H2 标题 + 可能的 H2 级介绍文本（无 H3 标题）
+                h3 = ""
+                seg_text = seg
+            else:
+                # 后续段：各自对应一个 H3 小节，还原 "### " 前缀
+                h3_line_end = seg.find("\n")
+                h3 = seg[:h3_line_end].strip() if h3_line_end > 0 else seg.strip()
+                seg_text = "### " + seg
+
+            if not seg_text.strip():
+                continue
+
+            # 对每个 H3 段做二级字符切分（控制单块不超过 max_chars）
+            sub_chunks = char_splitter.split_text(seg_text)
+            for chunk_text in sub_chunks:
+                chunks.append({
+                    "content": chunk_text.strip(),
+                    "metadata": {
+                        "h1": h1,
+                        "h2": h2,
+                        "h3": h3,
+                        "section_id": f"sec_{section_counter}",
+                        "parent_content": parent_content.strip(),
+                    }
+                })
         section_counter += 1
 
     return chunks
@@ -239,18 +249,29 @@ def ingest_document(
     if not md_text:
         raise ValueError("文档转换后内容为空")
 
-    # 2. MinIO 存储原始文件 + 处理后的 MD
-    storage_service.upload_file(
+    # 2. MinIO 存储原始文件 + 处理后的 MD（MinIO 为备份，失败不阻断主流程）
+    raw_uploaded = storage_service.upload_file(
         object_name=f"uploads/{file_hash}_{filename}",
         data=file_bytes,
         content_type="application/octet-stream"
     )
+    if not raw_uploaded:
+        logger.warning(
+            f"原始文件 《{filename}》 上传 MinIO 失败，ChromaDB 仍为主存储，"
+            f"建议检查 MinIO 服务状态后手动补传"
+        )
+
     md_bytes = md_text.encode("utf-8")
-    storage_service.upload_file(
+    md_uploaded = storage_service.upload_file(
         object_name=f"processed/{file_hash}.md",
         data=md_bytes,
         content_type="text/markdown; charset=utf-8"
     )
+    if not md_uploaded:
+        logger.warning(
+            f"处理后 Markdown 《{filename}》 上传 MinIO 失败，"
+            f"原始文件可通过 converter 重新生成，建议检查 MinIO 服务状态"
+        )
 
     # 3. 结构化切片
     chunks = split_markdown_into_chunks(md_text, max_chars=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
