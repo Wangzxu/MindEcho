@@ -19,6 +19,7 @@
         class="upload-zone"
         :class="{ dragging: isDragging }"
         @dragenter.prevent="dragCounter++; isDragging = true"
+        @dragover.prevent
         @dragleave.prevent="dragCounter--; if (dragCounter === 0) isDragging = false"
         @drop.prevent="dragCounter = 0; isDragging = false; handleDrop($event)"
         @click="triggerFileInput"
