@@ -18,9 +18,9 @@
       <div
         class="upload-zone"
         :class="{ dragging: isDragging }"
-        @dragover.prevent="isDragging = true"
-        @dragleave="isDragging = false"
-        @drop.prevent="handleDrop"
+        @dragenter.prevent="dragCounter++; isDragging = true"
+        @dragleave.prevent="dragCounter--; if (dragCounter === 0) isDragging = false"
+        @drop.prevent="dragCounter = 0; isDragging = false; handleDrop($event)"
         @click="triggerFileInput"
       >
         <input
@@ -216,6 +216,7 @@ const activeTab = ref('upload')
 // ---- Tab 1: Upload ----
 const fileInput = ref(null)
 const isDragging = ref(false)
+let dragCounter = 0
 const uploadTasks = reactive([])
 let taskIdCounter = 0
 
@@ -238,7 +239,7 @@ async function uploadFile(file) {
     const formData = new FormData()
     formData.append('file', file)
     const res = await axios.post('/api/admin/knowledge/upload', formData, {
-      headers: { ...props.getAuthHeader(), 'Content-Type': 'multipart/form-data' }
+      headers: { ...props.getAuthHeader() }
     })
     if (res.data?.code === 200) {
       task.step = 4
