@@ -36,15 +36,25 @@ def _fallback_docx(file_bytes: bytes) -> str:
     return "\n".join(p.text for p in doc.paragraphs)
 
 
+def _fallback_html(file_bytes: bytes) -> str:
+    """html2text 纯文本提取（trafilatura 的降级方案）"""
+    import html2text
+    h = html2text.HTML2Text()
+    h.ignore_links = False
+    h.ignore_images = True
+    h.body_width = 0
+    return h.handle(file_bytes.decode("utf-8", errors="ignore")).strip()
+
+
 def convert_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
     """PDF → Markdown，失败时降级到纯文本提取"""
     metadata = {"source_format": "pdf", "page_count": 0, "converter": "pymupdf4llm"}
 
     try:
         import pymupdf4llm
-        import fitz
+        import pymupdf
         # pymupdf4llm.to_markdown 不接受 BytesIO，需先用 stream 打开 Document 再传入
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=file_bytes, filetype="pdf")
         try:
             md_text = pymupdf4llm.to_markdown(doc)
             metadata["page_count"] = doc.page_count
@@ -97,23 +107,17 @@ def convert_html(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
                                        include_tables=True, include_images=False)
         if not md_text:
             # 降级到 html2text
-            import html2text
-            h = html2text.HTML2Text()
-            h.ignore_links = False
-            h.ignore_images = True
-            h.body_width = 0
-            md_text = h.handle(html_str)
             metadata["converter"] = "html2text_fallback"
+            md_text = _fallback_html(file_bytes)
         return md_text.strip(), metadata
     except ImportError:
         logger.warning("trafilatura 不可用，使用 html2text")
         metadata["converter"] = "html2text"
-        import html2text
-        h = html2text.HTML2Text()
-        h.ignore_links = False
-        h.ignore_images = True
-        h.body_width = 0
-        return h.handle(file_bytes.decode("utf-8", errors="ignore")).strip(), metadata
+        return _fallback_html(file_bytes), metadata
+    except Exception as e:
+        logger.warning(f"trafilatura 转换失败 ({e})，降级到 html2text")
+        metadata["converter"] = "html2text_fallback"
+        return _fallback_html(file_bytes), metadata
 
 
 def convert_to_markdown(file_bytes: bytes, filename: str) -> Tuple[str, Dict[str, Any]]:
