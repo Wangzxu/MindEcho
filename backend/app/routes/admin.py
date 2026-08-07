@@ -34,7 +34,13 @@ from app.schemas.safety import (
 from app.schemas.auth import UserResponse, UserProfileResponse
 from app.routes.auth import get_current_admin
 from app.services.intent import intent_service
-from app.services.rag import extract_text_from_file, split_text_into_chunks
+from app.services.rag import (
+    extract_text_from_file, split_text_into_chunks,
+    split_markdown_into_chunks, ingest_document,
+    retrieve_with_context, trace_retrieval
+)
+from app.services.converter import convert_to_markdown
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +476,10 @@ class ManualKnowledgeCreate(BaseModel):
     tags: Optional[str] = ""
 
 
+class TraceRequest(BaseModel):
+    query: str
+
+
 @admin_bp.post("/safety-seeds", response_model=Result[dict])
 def add_safety_seed(data: SafetySeedCreate, db: Session = Depends(get_db)):
     """
@@ -653,42 +663,27 @@ def add_manual_knowledge(data: ManualKnowledgeCreate, db: Session = Depends(get_
 @admin_bp.post("/knowledge/upload", response_model=Result[dict])
 async def upload_knowledge_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    上传 PDF/TXT/Word 知识文档，自动解析切片并向量化写入 ChromaDB
+    上传 PDF/DOCX/TXT/MD 知识文档，通过统一 MD 管线自动解析、结构化切片并向量化写入 ChromaDB。
     """
     try:
         content_bytes = await file.read()
         file_size = len(content_bytes)
-        
+
         # 1. 计算哈希去重
         file_hash = hashlib.sha256(content_bytes).hexdigest()
-        
-        existing = db.query(KnowledgeImport).filter(KnowledgeImport.file_hash == file_hash).first()
+        existing = db.query(KnowledgeImport).filter(
+            KnowledgeImport.file_hash == file_hash
+        ).first()
         if existing:
             raise HTTPException(status_code=400, detail="该文档已导入，请勿重复上传")
-            
-        # 2. 提取文本内容
-        text = extract_text_from_file(file, content_bytes)
-        text = text.strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="文档内容为空或无法提取文本")
 
-        object_name = f"uploads/{file_hash}_{file.filename}"
-        
-        # 物理上传至 MinIO
-        minio_uploaded = storage_service.upload_file(
-            object_name=object_name,
-            data=content_bytes,
-            content_type=file.content_type or "application/octet-stream"
-        )
-        
-        bucket_name = storage_service.bucket_name if minio_uploaded else "local-upload"
-            
-        # 3. 创建 MySQL 导入任务记录
+        # 2. 创建 MySQL 导入任务记录 (pending)
+        bucket_name = storage_service.bucket_name or "local-upload"
         task = KnowledgeImport(
             file_name=file.filename,
             file_hash=file_hash,
             minio_bucket=bucket_name,
-            minio_object_name=object_name,
+            minio_object_name=f"uploads/{file_hash}_{file.filename}",
             file_size=file_size,
             status="processing",
             chunk_count=0
@@ -696,35 +691,214 @@ async def upload_knowledge_file(file: UploadFile = File(...), db: Session = Depe
         db.add(task)
         db.commit()
         db.refresh(task)
-        
-        # 4. 对文本进行智能二次切片 (Chunking)，限制块大小并在超长时滑动切分句段
-        chunks = split_text_into_chunks(text, max_chars=300, overlap=50)
-            
-        # 5. 生成 Embedding 并写入 ChromaDB (psychology_kb)
-        collection = vector_db.get_collection("psychology_kb")
-        
-        for idx, chunk_text in enumerate(chunks):
-            context_text = f"【来源文件】{file.filename}\n{chunk_text}"
-            chunk_vec = llm_service.get_embedding(context_text)
-            collection.add(
-                ids=[f"{task.id}_chunk_{idx}"],
-                embeddings=[chunk_vec],
-                metadatas=[{"import_id": task.id, "file_name": file.filename, "chunk_index": idx}],
-                documents=[context_text]
-            )
-            
-        task.chunk_count = len(chunks)
-        task.status = "success"
-        db.commit()
-        
-        logger.info(f"文档 《{file.filename}》 成功解析并分块向量化！共生成 {len(chunks)} 个 Chunks。")
-        return Result.success(data={"import_id": task.id, "chunk_count": len(chunks)}, message="文档导入及 ChromaDB 同步成功")
+
+        # 3. 使用新管线入库
+        chunk_count = ingest_document(
+            file_bytes=content_bytes,
+            filename=file.filename,
+            file_hash=file_hash,
+            task=task,
+            db=db
+        )
+
+        logger.info(
+            f"文档 《{file.filename}》 成功解析并结构化分块向量化！共生成 {chunk_count} 个 Chunks。"
+        )
+        return Result.success(
+            data={"import_id": task.id, "chunk_count": chunk_count},
+            message="文档导入及 ChromaDB 同步成功"
+        )
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
         logger.error(f"文档导入向量化失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"上传处理失败: {str(e)}")
+
+
+@admin_bp.post("/knowledge/trace", response_model=Result[dict])
+def trace_knowledge_retrieval(data: TraceRequest, db: Session = Depends(get_db)):
+    """
+    全链路调试追踪：输入查询，返回 Query → Embedding → Search → Small-to-Big 展开
+    每一步的详细数据，含命中 chunk、章节路径、相似度分数。不调用 LLM。
+    """
+    try:
+        query = data.query.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="查询内容不能为空")
+
+        trace = trace_retrieval(query)
+        return Result.success(data=trace, message="链路追踪完成")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"链路追踪失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"追踪失败: {str(e)}")
+
+
+@admin_bp.get("/knowledge/{import_id}/chunks", response_model=Result[dict])
+def get_knowledge_chunks(import_id: int, db: Session = Depends(get_db)):
+    """
+    查看指定导入文档的所有 chunk 及章节结构。
+    """
+    try:
+        task = db.query(KnowledgeImport).filter(KnowledgeImport.id == import_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="文档导入记录不存在")
+
+        collection = vector_db.get_collection("psychology_kb")
+        result = collection.get(
+            where={"import_id": import_id},
+            include=["documents", "metadatas"]
+        )
+
+        chunks = []
+        if result and result.get("ids"):
+            for i, cid in enumerate(result["ids"]):
+                meta = result["metadatas"][i] if result["metadatas"] else {}
+                chunks.append({
+                    "chunk_id": cid,
+                    "content": result["documents"][i] if result["documents"] else "",
+                    "chunk_index": meta.get("chunk_index", i),
+                    "h1": meta.get("h1", ""),
+                    "h2": meta.get("h2", ""),
+                    "h3": meta.get("h3", ""),
+                    "section_id": meta.get("section_id", ""),
+                })
+
+        # 按 chunk_index 排序
+        chunks.sort(key=lambda c: c["chunk_index"])
+
+        return Result.success(data={
+            "import_id": import_id,
+            "file_name": task.file_name,
+            "total_chunks": len(chunks),
+            "chunks": chunks
+        }, message="获取 chunk 列表成功")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取 chunk 列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@admin_bp.post("/knowledge/{import_id}/reprocess", response_model=Result[dict])
+def reprocess_knowledge(import_id: int, db: Session = Depends(get_db)):
+    """
+    对已入库文档重新执行 MD 转换 → 切片 → 向量化。
+
+    会删除旧的 ChromaDB 数据并重新生成。适用于切换切片策略或转换器升级后重建索引。
+    """
+    try:
+        task = db.query(KnowledgeImport).filter(KnowledgeImport.id == import_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="文档导入记录不存在")
+
+        # 1. 从 MinIO 读取原始文件
+        try:
+            from minio import Minio
+            client = Minio(
+                endpoint=Config.MINIO_ENDPOINT,
+                access_key=Config.MINIO_ACCESS_KEY,
+                secret_key=Config.MINIO_SECRET_KEY,
+                secure=Config.MINIO_SECURE
+            )
+            response = client.get_object(task.minio_bucket, task.minio_object_name)
+            file_bytes = response.read()
+            response.close()
+            response.release_conn()
+        except Exception as e:
+            # 如果 MinIO 不可用，尝试从 processed/ MD 文件重建
+            logger.warning(f"无法从 MinIO 读取原始文件 ({e})，尝试从 processed/ MD 重建")
+            try:
+                md_object = f"processed/{task.file_hash}.md"
+                response = client.get_object(task.minio_bucket, md_object)
+                md_bytes = response.read()
+                response.close()
+                response.release_conn()
+                # 直接从 MD 重新切片
+                md_text = md_bytes.decode("utf-8")
+                chunks = split_markdown_into_chunks(md_text)
+                file_bytes = md_bytes  # 用于后续重存
+            except Exception as e2:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"无法读取原始文件或处理后 MD: {e2}"
+                )
+
+        # 2. 删除旧的 ChromaDB 数据
+        collection = vector_db.get_collection("psychology_kb")
+        try:
+            collection.delete(where={"import_id": import_id})
+        except Exception:
+            pass  # ChromaDB 可能没有 where 过滤删除，忽略
+
+        # 3. 设置状态为 processing
+        task.status = "processing"
+        task.chunk_count = 0
+        db.commit()
+
+        # 4. 重新入库
+        chunk_count = ingest_document(
+            file_bytes=file_bytes,
+            filename=task.file_name,
+            file_hash=task.file_hash,
+            task=task,
+            db=db
+        )
+
+        return Result.success(
+            data={"import_id": import_id, "chunk_count": chunk_count},
+            message=f"重处理完成，生成 {chunk_count} 个 chunks"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"重处理失败 (import_id={import_id}): {str(e)}")
+        raise HTTPException(status_code=500, detail=f"重处理失败: {str(e)}")
+
+
+@admin_bp.get("/knowledge/{import_id}/markdown", response_model=Result[dict])
+def get_knowledge_markdown(import_id: int, db: Session = Depends(get_db)):
+    """
+    获取文档处理后的 Markdown 原文（调试用）。
+    从 MinIO processed/ 路径读取。
+    """
+    try:
+        task = db.query(KnowledgeImport).filter(KnowledgeImport.id == import_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="文档导入记录不存在")
+
+        try:
+            from minio import Minio
+            client = Minio(
+                endpoint=Config.MINIO_ENDPOINT,
+                access_key=Config.MINIO_ACCESS_KEY,
+                secret_key=Config.MINIO_SECRET_KEY,
+                secure=Config.MINIO_SECURE
+            )
+            md_object = f"processed/{task.file_hash}.md"
+            response = client.get_object(task.minio_bucket, md_object)
+            md_text = response.read().decode("utf-8")
+            response.close()
+            response.release_conn()
+        except Exception as e:
+            raise HTTPException(
+                status_code=404,
+                detail=f"无法读取处理后的 Markdown 文件: {str(e)}"
+            )
+
+        return Result.success(data={
+            "import_id": import_id,
+            "file_name": task.file_name,
+            "markdown": md_text
+        }, message="获取 Markdown 原文成功")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取 Markdown 原文失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
 
 
 @admin_bp.get("/knowledge", response_model=Result[dict])
