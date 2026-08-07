@@ -36,13 +36,19 @@
         />
 
         <!-- 3. 安全过滤管理 -->
-        <SafetyConfig 
-          v-if="activeMenu === 'safety'" 
+        <SafetyConfig
+          v-if="activeMenu === 'safety'"
           :keywords="keywords"
           @add-keyword="addKeyword"
           @toggle-keyword-status="toggleWordStatus"
           @increment-mock-stats="incrementMockStats"
           @show-toast="showToast"
+        />
+
+        <!-- 4. 知识库管理 -->
+        <KnowledgeManager
+          v-if="activeMenu === 'knowledge'"
+          :getAuthHeader="getAuthHeader"
         />
       </main>
     </div>
@@ -79,6 +85,7 @@ import DashboardOverview from '../components/admin/DashboardOverview.vue'
 import StudentManagement from '../components/admin/StudentManagement.vue'
 import SafetyConfig from '../components/admin/SafetyConfig.vue'
 import ProfileModal from '../components/admin/ProfileModal.vue'
+import KnowledgeManager from '../components/admin/KnowledgeManager.vue'
 
 const router = useRouter()
 const adminName = ref('管理员')
@@ -137,7 +144,8 @@ const selectedUserProfile = ref({
 const menus = [
   { id: 'overview', label: '控制台概览', icon: '📊' },
   { id: 'users', label: '学生心理档案', icon: '👥' },
-  { id: 'safety', label: '安全过滤管理', icon: '🛡️' }
+  { id: 'safety', label: '安全过滤管理', icon: '🛡️' },
+  { id: 'knowledge', label: '知识库管理', icon: '📚' }
 ]
 
 // 原生 Base64 令牌负载解析
