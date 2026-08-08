@@ -2,7 +2,7 @@
   <div class="students-container">
     <div class="users-list-header">
       <h2>学生账户与心理画像管理</h2>
-      <button class="btn-primary" @click="$emit('refresh')">🔄 刷新列表</button>
+      <button class="btn-primary" @click="fetchUsers">🔄 刷新列表</button>
     </div>
 
     <div class="table-container card-panel">
@@ -38,7 +38,7 @@
                 <button class="btn-accent btn-xs" @click="$emit('view-user-profile', user)">🔍 查阅画像</button>
                 <button 
                   :class="['btn-xs', user.is_active ? 'btn-warning-outline' : 'btn-primary-outline']"
-                  @click="$emit('toggle-user-status', user)"
+                  @click="toggleUserStatus(user)"
                 >
                   {{ user.is_active ? '停用' : '激活' }}
                 </button>
@@ -55,14 +55,37 @@
 </template>
 
 <script setup>
-defineProps({
-  users: {
-    type: Array,
-    required: true
-  }
-})
+import { ref, onMounted } from 'vue'
+import axios from 'axios'
+import { getAuthHeader } from '../../composables/useAuth'
 
-defineEmits(['view-user-profile', 'toggle-user-status', 'refresh'])
+const emit = defineEmits(['view-user-profile'])
+
+const users = ref([])
+
+async function fetchUsers() {
+  try {
+    const res = await axios.get('/api/admin/students', { headers: getAuthHeader(), params: { page: 1, size: 100 } })
+    if (res.data?.code === 200) {
+      users.value = (res.data.data.items || []).map(user => ({
+        id: user.id, username: user.username, role: user.role,
+        is_active: user.is_active, profile_summary: user.nickname || '暂无画像特征'
+      }))
+    }
+  } catch (err) { console.error('获取学生列表失败:', err) }
+}
+
+async function toggleUserStatus(user) {
+  try {
+    const nextStatus = !user.is_active
+    const res = await axios.put(`/api/admin/students/${user.id}/status`, { is_active: nextStatus }, { headers: getAuthHeader() })
+    if (res.data?.code === 200) user.is_active = nextStatus
+  } catch (err) { console.error('修改状态失败:', err) }
+}
+
+onMounted(() => fetchUsers())
+
+defineExpose({ users, fetchUsers })
 </script>
 
 <style scoped>

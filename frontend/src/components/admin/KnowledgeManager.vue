@@ -201,10 +201,8 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import axios from 'axios'
-
-const props = defineProps({
-  getAuthHeader: { type: Function, required: true }
-})
+import { getAuthHeader } from '../../composables/useAuth'
+import { formatTime, formatSize } from '../../composables/useFormat'
 
 // ---- Tabs ----
 const tabs = [
@@ -240,7 +238,7 @@ async function uploadFile(file) {
     const formData = new FormData()
     formData.append('file', file)
     const res = await axios.post('/api/admin/knowledge/upload', formData, {
-      headers: { ...props.getAuthHeader() }
+      headers: { ...getAuthHeader() }
     })
     if (res.data?.code === 200) {
       task.step = 4
@@ -279,7 +277,7 @@ const totalPages = computed(() => Math.max(1, Math.ceil(listItems.value.length /
 async function fetchList() {
   try {
     const res = await axios.get('/api/admin/knowledge', {
-      headers: props.getAuthHeader(),
+      headers: getAuthHeader(),
       params: { page: page.value, size: 100, keyword: searchKeyword.value || undefined }
     })
     if (res.data?.code === 200) {
@@ -290,26 +288,10 @@ async function fetchList() {
   }
 }
 
-function formatSize(bytes) {
-  if (!bytes) return '-'
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
-
-function formatTime(iso) {
-  if (!iso) return '-'
-  try {
-    const d = new Date(iso)
-    const pad = n => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  } catch { return iso }
-}
-
 async function reprocessItem(item) {
   try {
     const res = await axios.post(`/api/admin/knowledge/${item.id}/reprocess`, {}, {
-      headers: props.getAuthHeader()
+      headers: getAuthHeader()
     })
     if (res.data?.code === 200) {
       item.status = 'success'
@@ -323,7 +305,7 @@ async function reprocessItem(item) {
 async function viewChunks(item) {
   try {
     const res = await axios.get(`/api/admin/knowledge/${item.id}/chunks`, {
-      headers: props.getAuthHeader()
+      headers: getAuthHeader()
     })
     if (res.data?.code === 200) {
       // 在控制台输出，后续可扩展为弹窗
@@ -354,7 +336,7 @@ async function runTrace() {
   try {
     const res = await axios.post('/api/admin/knowledge/trace',
       { query: debugQuery.value.trim() },
-      { headers: props.getAuthHeader() }
+      { headers: getAuthHeader() }
     )
     if (res.data?.code === 200) {
       traceData.value = res.data.data

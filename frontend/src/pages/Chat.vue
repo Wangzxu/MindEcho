@@ -49,6 +49,7 @@
 import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
+import { getPayload } from '../composables/useAuth'
 import CapybaraSvg from '../components/CapybaraSvg.vue'
 import ChatSidebar from '../components/chat/ChatSidebar.vue'
 import MessageArea from '../components/chat/MessageArea.vue'
@@ -78,15 +79,6 @@ const chatInputRef = ref(null)
 const activeSession = computed(() => {
   return sessions.value.find(s => s.id === activeSessionId.value)
 })
-
-// 原生 Base64 令牌负载解析
-function getPayload(tokenStr) {
-  try {
-    return JSON.parse(atob(tokenStr.split('.')[1]));
-  } catch (e) {
-    return null;
-  }
-}
 
 // 自动滚动到底部
 const scrollToBottom = async () => {

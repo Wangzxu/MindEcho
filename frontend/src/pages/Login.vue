@@ -108,51 +108,24 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
+import { getPayload } from '../composables/useAuth'
+import { useTheme } from '../composables/useTheme'
 import CapybaraSvg from '../components/CapybaraSvg.vue'
 
 const router = useRouter()
-const activeTab = ref('student') // student, admin, register
+const activeTab = ref('student')
 const isLoading = ref(false)
 const errorMsg = ref('')
 const successMsg = ref('')
-const isNightMode = ref(false)
+const { isNight: isNightMode, toggle: toggleNightMode } = useTheme()
 
 const form = reactive({
   username: '',
   password: '',
   nickname: ''
-})
-
-// 原生 Base64 令牌负载解析
-function getPayload(token) {
-  try {
-    return JSON.parse(atob(token.split('.')[1]));
-  } catch (e) {
-    return null;
-  }
-}
-
-// 切换日夜间模式
-function toggleNightMode() {
-  isNightMode.value = !isNightMode.value
-  if (isNightMode.value) {
-    document.body.classList.add('night-mode')
-  } else {
-    document.body.classList.remove('night-mode')
-  }
-}
-
-// 初始化日夜模式
-onMounted(() => {
-  // 根据时间自动切换模式：晚上 7 点到早上 7 点自动切换为夜间模式
-  const hour = new Date().getHours()
-  if (hour >= 19 || hour < 7) {
-    isNightMode.value = true
-    document.body.classList.add('night-mode')
-  }
 })
 
 // 切换选项卡

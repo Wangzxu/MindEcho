@@ -197,3 +197,83 @@ body {
 .fade-enter-from, .fade-leave-to {
   opacity: 0;
 }
+
+/* =====================================================================
+   共享组件样式 — 表格 / 徽章 / 按钮变体 / 间距 / 空状态
+   ===================================================================== */
+
+/* 空状态占位 */
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-secondary);
+}
+.empty-icon {
+  font-size: 36px;
+  display: block;
+  margin-bottom: 12px;
+}
+
+/* 统一数据表格 */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+.data-table th {
+  padding: 10px 8px;
+  border-bottom: 2px solid var(--border-color);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 12px;
+}
+.data-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 统一徽章 */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.badge-success { background: #d5f5e3; color: #27ae60; }
+.badge-warning { background: #fef9e7; color: #f39c12; }
+.badge-danger  { background: #fadbd8; color: #e74c3c; }
+.badge-info    { background: #ebf5fb; color: #2980b9; }
+
+/* 按钮变体 */
+.btn-sm {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-color);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition-normal);
+}
+.btn-sm:hover { background: var(--primary-light); border-color: var(--primary); }
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: var(--transition-normal);
+}
+.btn-ghost:hover { background: var(--primary-light); color: var(--primary-hover); }
+
+/* 文本截断 */
+.text-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

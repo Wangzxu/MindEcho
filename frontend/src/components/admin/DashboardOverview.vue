@@ -77,18 +77,42 @@
 </template>
 
 <script setup>
-defineProps({
-  stats: {
-    type: Object,
-    required: true
-  },
-  activityLogs: {
-    type: Array,
-    required: true
-  }
-})
+import { ref, reactive, onMounted } from 'vue'
+import axios from 'axios'
+import { getAuthHeader } from '../../composables/useAuth'
+import { formatTime } from '../../composables/useFormat'
 
-defineEmits(['view-audit-log'])
+const emit = defineEmits(['view-audit-log'])
+
+const stats = reactive({ studentCount: 0, sessionCount: 0, highRiskCount: 0, violationCount: 0 })
+const activityLogs = ref([])
+
+async function fetchStats() {
+  try {
+    const res = await axios.get('/api/admin/dashboard/stats', { headers: getAuthHeader() })
+    if (res.data?.code === 200) {
+      const d = res.data.data
+      stats.studentCount = d.student_count
+      stats.sessionCount = d.session_count
+      stats.highRiskCount = d.high_risk_count
+      stats.violationCount = d.violation_count
+    }
+  } catch (err) { console.error('获取统计数据失败:', err) }
+}
+
+async function fetchActivityLogs() {
+  try {
+    const res = await axios.get('/api/admin/security/logs', { headers: getAuthHeader(), params: { page: 1, size: 50 } })
+    if (res.data?.code === 200) {
+      activityLogs.value = (res.data.data.items || []).map(log => ({
+        id: log.id, time: formatTime(log.created_at), sessionId: log.session_id,
+        type: log.log_type, content: log.trigger_content, rule: log.matched_rule, userId: log.user_id
+      }))
+    }
+  } catch (err) { console.error('获取活动日志失败:', err) }
+}
+
+onMounted(() => { fetchStats(); fetchActivityLogs() })
 </script>
 
 <style scoped>
