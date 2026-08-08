@@ -3,6 +3,9 @@
     <div class="sidebar-header">
       <span class="logo-emoji">🌱</span>
       <span class="app-name">MindEcho</span>
+      <button class="theme-toggle" @click="toggle" :title="isNight ? '切换日间' : '切换夜间'">
+        {{ isNight ? '☀️' : '🌙' }}
+      </button>
     </div>
     <div class="user-info">
       <div class="avatar-container">
@@ -42,7 +45,10 @@
 </template>
 
 <script setup>
+import { useTheme } from '../../composables/useTheme'
 import EmptyState from '../shared/EmptyState.vue'
+
+const { isNight, toggle } = useTheme()
 
 defineProps({
   sessions: { type: Array, default: () => [] },
@@ -58,10 +64,17 @@ defineEmits(['select-session', 'create-session', 'logout'])
 .sidebar {
   width: 280px; display: flex; flex-direction: column; padding: 25px 15px;
   border-radius: var(--radius-lg); background: var(--panel-bg); flex-shrink: 0;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.05); box-sizing: border-box;
+  box-shadow: 0 10px 30px var(--shadow-color); box-sizing: border-box;
 }
 .sidebar-header { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 600; margin-bottom: 20px; color: var(--primary); }
 .logo-emoji { font-size: 24px; }
+.app-name { flex: 1; }
+.theme-toggle {
+  background: var(--primary-light); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); padding: 4px 8px; font-size: 14px;
+  cursor: pointer; transition: var(--transition-normal);
+}
+.theme-toggle:hover { background: var(--border-color); }
 .user-info { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--primary-light); border-radius: var(--radius-md); margin-bottom: 15px; }
 .avatar-placeholder { width: 40px; height: 40px; border-radius: 50%; background: var(--panel-bg); display: flex; justify-content: center; align-items: center; font-size: 20px; }
 .user-nickname { font-weight: 600; font-size: 15px; color: var(--primary-hover); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -321,7 +321,7 @@ onMounted(() => {
   flex-direction: column;
   background-color: var(--panel-bg);
   border-radius: var(--radius-lg);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 10px 30px var(--shadow-color);
   overflow: hidden;
 }
 .chat-header {
