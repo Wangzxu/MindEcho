@@ -355,15 +355,15 @@ onMounted(() => {
   font-weight: 500;
 }
 .active-mode-tag.incognito {
-  background-color: #F4ECF7;
-  color: #7D3C98;
-  border: 1px solid #E8DAEF;
+  background: var(--accent-light);
+  color: var(--accent-hover);
+  border: 1px solid var(--accent);
   animation: pulse-border 2s infinite;
 }
 
 @keyframes pulse-border {
-  0% { border-color: rgba(125, 60, 152, 0.2); }
-  50% { border-color: rgba(125, 60, 152, 0.6); }
-  100% { border-color: rgba(125, 60, 152, 0.2); }
+  0% { border-color: rgba(200, 135, 129, 0.2); }
+  50% { border-color: rgba(200, 135, 129, 0.5); }
+  100% { border-color: rgba(200, 135, 129, 0.2); }
 }
 </style>
