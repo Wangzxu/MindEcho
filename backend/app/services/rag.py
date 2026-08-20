@@ -278,7 +278,7 @@ def ingest_document(
     if not chunks:
         raise ValueError("文档切片后无有效内容")
 
-    # 4. 每个 chunk 嵌入 + 写入 ChromaDB
+    # 4. 批量嵌入 + 写入 ChromaDB（逐批更新进度，避免大文档长时间无反馈）
     collection = vector_db.get_collection(COLLECTION_NAME)
 
     ids = []
@@ -286,30 +286,42 @@ def ingest_document(
     documents = []
     metadatas = []
 
+    # 构造上下文增强文本
+    context_texts = []
     for idx, chunk in enumerate(chunks):
-        # 构造上下文增强的文档文本
         h_path_parts = [p for p in [chunk["metadata"]["h1"],
                                      chunk["metadata"]["h2"],
                                      chunk["metadata"]["h3"]] if p]
         h_path = " > ".join(h_path_parts) if h_path_parts else filename
+        context_texts.append(f"【{h_path}】\n{chunk['content']}")
 
-        context_text = f"【{h_path}】\n{chunk['content']}"
-        chunk_vec = llm_service.get_embedding(context_text)
+    # 分批嵌入：每批 50 条，批间回写 processed_chunks 进度
+    EMBED_PROGRESS_BATCH = 50
+    for start in range(0, len(context_texts), EMBED_PROGRESS_BATCH):
+        batch_texts = context_texts[start:start + EMBED_PROGRESS_BATCH]
+        batch_vecs = llm_service.batch_embed(batch_texts)
 
-        ids.append(f"{task.id}_chunk_{idx}")
-        embeddings.append(chunk_vec)
-        documents.append(context_text)
-        metadatas.append({
-            "import_id": task.id,
-            "file_name": filename,
-            "chunk_index": idx,
-            "h1": chunk["metadata"]["h1"],
-            "h2": chunk["metadata"]["h2"],
-            "h3": chunk["metadata"]["h3"],
-            "section_id": chunk["metadata"]["section_id"],
-            "parent_content": chunk["metadata"]["parent_content"],
-            "converter": conv_meta.get("converter", "unknown"),
-        })
+        for j, (ctx, vec) in enumerate(zip(batch_texts, batch_vecs)):
+            idx = start + j
+            chunk = chunks[idx]
+            ids.append(f"{task.id}_chunk_{idx}")
+            embeddings.append(vec)
+            documents.append(ctx)
+            metadatas.append({
+                "import_id": task.id,
+                "file_name": filename,
+                "chunk_index": idx,
+                "h1": chunk["metadata"]["h1"],
+                "h2": chunk["metadata"]["h2"],
+                "h3": chunk["metadata"]["h3"],
+                "section_id": chunk["metadata"]["section_id"],
+                "parent_content": chunk["metadata"]["parent_content"],
+                "converter": conv_meta.get("converter", "unknown"),
+            })
+
+        # 进度回写（每完成一批 commit 一次，失败可定位到进度）
+        task.processed_chunks = min(start + len(batch_texts), len(chunks))
+        db.commit()
 
     collection.add(
         ids=ids,
@@ -320,6 +332,7 @@ def ingest_document(
 
     # 5. 更新 MySQL 任务状态
     task.chunk_count = len(chunks)
+    task.processed_chunks = len(chunks)
     task.status = "success"
     db.commit()
 
@@ -469,6 +482,8 @@ def trace_retrieval(query: str) -> dict:
                 "score": round(float(1.0 - distances[idx]), 4),
                 "content": documents[idx],
                 "file_name": meta.get("file_name", "未知"),
+                "import_id": meta.get("import_id", ""),
+                "chunk_index": meta.get("chunk_index", ""),
                 "h1": meta.get("h1", ""),
                 "h2": meta.get("h2", ""),
                 "h3": meta.get("h3", ""),
@@ -486,22 +501,59 @@ def trace_retrieval(query: str) -> dict:
     })
 
     # Step 4: Small-to-Big expansion
-    seen_sections = set()
-    parent_docs = []
+    # 分组：优先按 section_id（同一父文档小节的子 chunk 归组）；
+    # 旧数据无 section_id 时按 import_id 归组；再无则按 chunk_id 独立成组。
+    groups = {}
     for cd in chunks_detail:
-        sid = cd.get("section_id", cd["chunk_id"])
-        if sid in seen_sections:
-            continue
-        seen_sections.add(sid)
-        parent_docs.append(cd)
+        sid = cd.get("section_id") or ""
+        if sid:
+            key = ("sec", sid)
+        else:
+            import_id = cd.get("import_id") or ""
+            if import_id:
+                key = ("import", import_id)
+            else:
+                key = ("chunk", cd["chunk_id"])
+        groups.setdefault(key, []).append(cd)
 
-    total_chars = sum(len(p["parent_content"]) for p in parent_docs[:TOP_K_PARENTS])
+    # 每组展开：优先使用父文档内容；找不到父文档时，把该组全部子文档拼接作为测试内容
+    parent_docs = []
+    fallback_count = 0
+    for key, members in groups.items():
+        members.sort(key=lambda m: m["rank"])  # 保持命中顺序
+        parent_content = next(
+            (m["parent_content"] for m in members if m.get("parent_content")), ""
+        )
+        source = "parent"
+        if not parent_content:
+            parent_content = "\n\n".join(m["content"] for m in members)
+            source = "children_concat"
+            fallback_count += 1
+        first = members[0]
+        parent_docs.append({
+            "section_id": first.get("section_id", ""),
+            "import_id": first.get("import_id", ""),
+            "file_name": first.get("file_name", "未知"),
+            "h1": first.get("h1", ""),
+            "h2": first.get("h2", ""),
+            "h3": first.get("h3", ""),
+            "source": source,               # parent=真实父文档 | children_concat=子文档拼接
+            "chunk_count": len(members),
+            "score": max(m["score"] for m in members),
+            "content": parent_content,
+        })
+
+    parent_count = len(parent_docs)
+    dedup_count = min(parent_count, TOP_K_PARENTS)
+    total_chars = sum(len(p["content"]) for p in parent_docs[:TOP_K_PARENTS])
 
     trace["steps"].append({
         "name": "父文档展开 (Small-to-Big)",
         "child_count": len(chunks_detail),
-        "parent_count": len(parent_docs),
-        "dedup_count": min(len(parent_docs), TOP_K_PARENTS),
+        "parent_count": parent_count,
+        "dedup_count": dedup_count,
+        "fallback_concat_count": fallback_count,
+        "expanded": parent_docs[:TOP_K_PARENTS],
         "total_chars": total_chars,
         "estimated_tokens": total_chars // 2,  # 中文字符粗略估算
         "budget_tokens": 1300,

@@ -15,6 +15,7 @@ class KnowledgeImport(Base):
     file_size = Column(Integer, nullable=False)
     status = Column(String(20), nullable=False, default="pending")  # pending, processing, success, failed
     chunk_count = Column(Integer, default=0)
+    processed_chunks = Column(Integer, default=0)  # 已向量化完成的 chunk 数（异步进度）
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -28,6 +29,7 @@ class KnowledgeImport(Base):
             "file_size": self.file_size,
             "status": self.status,
             "chunk_count": self.chunk_count,
+            "processed_chunks": self.processed_chunks,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat()
         }

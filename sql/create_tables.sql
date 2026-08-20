@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS `knowledge_imports` (
     `file_size` INT NOT NULL COMMENT '文件字节大小',
     `status` VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT '处理状态: pending, processing, success, failed',
     `chunk_count` INT DEFAULT 0 COMMENT '被切分出的文本块总量',
+    `processed_chunks` INT DEFAULT 0 COMMENT '已向量化完成的chunk数（异步进度）',
     `error_message` TEXT DEFAULT NULL COMMENT '向量化失败时的错误日志',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     INDEX `idx_imports_file_name` (`file_name`)

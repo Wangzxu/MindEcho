@@ -60,7 +60,22 @@
             <span class="step-arrow">→</span>
             <span :class="['step', { done: task.step >= 4 }]">✅ 完成</span>
           </div>
+          <!-- 异步处理进度条 -->
+          <div v-if="task.status === 'processing' && task.processedChunks > 0" class="task-progress">
+            <div class="progress-track">
+              <div
+                class="progress-fill"
+                :style="{ width: progressPercent(task) + '%' }"
+              ></div>
+            </div>
+            <span class="progress-text">
+              {{ task.processedChunks }} / {{ task.chunkCount || '?' }} chunks 已向量化
+            </span>
+          </div>
           <div v-if="task.error" class="task-error">{{ task.error }}</div>
+          <div v-if="task.replacedImportId" class="task-replaced">
+            ♻️ 已覆盖旧版本（import_id={{ task.replacedImportId }}），只保留最新一份
+          </div>
         </div>
       </div>
     </div>
@@ -102,6 +117,7 @@
             <td class="action-cell">
               <button class="btn-sm" @click="reprocessItem(item)">🔄 重处理</button>
               <button class="btn-sm" @click="viewChunks(item)">📋 Chunks</button>
+              <button class="btn-sm btn-danger" @click="deleteItem(item)">🗑️ 删除</button>
             </td>
           </tr>
         </tbody>
@@ -115,8 +131,7 @@
     </div>
 
     <!-- ============ Tab 3: 链路调试 ============ -->
-    <div v-if="activeTab === 'debug'" class="tab-content">
-      <div class="debug-input-row">
+    <div v-if="activeTab === 'debug'" class="tab-content">      <div class="debug-input-row">
         <input
           v-model="debugQuery"
           type="text"
@@ -181,10 +196,32 @@
               <div v-if="step.child_count !== undefined" class="sbs-stats">
                 <span>{{ step.child_count }} 个子 chunk → {{ step.parent_count }} 个父文档</span>
                 <span>去重后: {{ step.dedup_count }}</span>
+                <span v-if="step.fallback_concat_count" class="concat-badge">
+                  🧩 {{ step.fallback_concat_count }} 个为子文档拼接（缺父文档）
+                </span>
                 <span>{{ step.total_chars }} 字符 (~{{ step.estimated_tokens }} tokens)</span>
                 <span :class="step.within_budget ? 'budget-ok' : 'budget-over'">
                   {{ step.within_budget ? '✅' : '⚠️' }} 预算 {{ step.budget_tokens }} tokens
                 </span>
+              </div>
+
+              <!-- 展开后的父文档/拼接内容 -->
+              <div v-if="step.expanded && step.expanded.length" class="sbs-parents">
+                <div
+                  v-for="(p, pi) in step.expanded"
+                  :key="pi"
+                  :class="['sbs-parent', p.source === 'children_concat' ? 'is-concat' : '']"
+                >
+                  <div class="sbs-parent-head">
+                    <span class="sbs-source">
+                      {{ p.source === 'children_concat' ? '🧩 子文档拼接' : '📄 父文档' }} #{{ pi + 1 }}
+                    </span>
+                    <span v-if="p.file_name">📄 {{ p.file_name }}</span>
+                    <span v-if="p.section_id">section: {{ p.section_id }}</span>
+                    <span>{{ p.chunk_count }} chunks · 最高分 {{ p.score }}</span>
+                  </div>
+                  <pre>{{ p.content }}</pre>
+                </div>
               </div>
             </div>
           </div>
@@ -195,11 +232,47 @@
         输入测试问题，点击"检索"查看完整的 RAG 链路追踪
       </div>
     </div>
+
+    <!-- ============ Chunks 可视化弹窗 ============ -->
+    <div v-if="showChunksModal" class="modal-overlay" @click.self="closeChunksModal">
+      <div class="chunks-modal">
+        <div class="modal-header">
+          <div class="modal-title">
+            📋 {{ chunksData?.file_name }}
+            <span class="modal-sub">共 {{ chunksData?.total_chunks }} 个 chunks</span>
+          </div>
+          <button class="modal-close" @click="closeChunksModal">✕</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="chunksLoading" class="empty-state">加载中...</div>
+          <div v-else-if="!chunksData?.chunks?.length" class="empty-state">暂无 chunks</div>
+          <div v-else class="chunk-list">
+            <div v-for="(c, ci) in chunksData.chunks" :key="ci" class="chunk-detail-card">
+              <div class="chunk-detail-head">
+                <span class="chunk-detail-index">#{{ c.chunk_index ?? ci }}</span>
+                <span v-if="c.section_id" class="chunk-detail-sec">section: {{ c.section_id }}</span>
+                <span v-if="c.converter" class="chunk-detail-sec">转换器: {{ c.converter }}</span>
+              </div>
+              <div v-if="c.h1 || c.h2 || c.h3" class="chunk-detail-path">
+                📂 {{ [c.h1, c.h2, c.h3].filter(Boolean).join(' > ') }}
+              </div>
+              <div class="chunk-detail-label">子 chunk 内容</div>
+              <pre class="chunk-detail-pre">{{ c.content }}</pre>
+              <details v-if="c.parent_content" class="chunk-detail-parent">
+                <summary>📄 父文档（{{ c.parent_content.length }} 字符）</summary>
+                <pre class="chunk-detail-pre">{{ c.parent_content }}</pre>
+              </details>
+              <div v-else class="chunk-detail-noparent">⚠️ 无父文档元数据（旧数据/手动录入）</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onUnmounted } from 'vue'
 import axios from 'axios'
 import { getAuthHeader } from '../../composables/useAuth'
 import { formatTime, formatSize } from '../../composables/useFormat'
@@ -228,9 +301,18 @@ function statusLabel(s) {
   return map[s] || s
 }
 
+function progressPercent(task) {
+  if (!task.chunkCount) return 0
+  return Math.min(100, Math.round((task.processedChunks / task.chunkCount) * 100))
+}
+
 async function uploadFile(file) {
   const tid = ++taskIdCounter
-  const task = reactive({ id: tid, fileName: file.name, status: 'processing', step: 0, error: '' })
+  const task = reactive({
+    id: tid, importId: null, fileName: file.name,
+    status: 'pending', step: 0, error: '', replacedImportId: null,
+    chunkCount: 0, processedChunks: 0, pollTimer: null
+  })
   uploadTasks.push(task)
 
   try {
@@ -241,8 +323,10 @@ async function uploadFile(file) {
       headers: { ...getAuthHeader() }
     })
     if (res.data?.code === 200) {
-      task.step = 4
-      task.status = 'success'
+      // 上传已入队，立即拿到 import_id，开始轮询后台处理状态
+      task.importId = res.data.data.import_id
+      task.replacedImportId = res.data.data.replaced_import_id || null
+      startPolling(task)
     } else {
       throw new Error(res.data?.message || '上传失败')
     }
@@ -251,6 +335,51 @@ async function uploadFile(file) {
     task.error = err.response?.data?.detail || err.message || '上传失败'
   }
 }
+
+const POLL_INTERVAL_MS = 1500
+
+function startPolling(task) {
+  task.step = 2
+  task.status = 'processing'
+  task.pollTimer = setInterval(async () => {
+    try {
+      const res = await axios.get(`/api/admin/knowledge/${task.importId}/status`, {
+        headers: getAuthHeader()
+      })
+      if (res.data?.code !== 200) throw new Error(res.data?.message || '状态查询失败')
+      const st = res.data.data
+      task.status = st.status
+      task.chunkCount = st.chunk_count || 0
+      task.processedChunks = st.processed_chunks || 0
+      if (st.error_message) task.error = st.error_message
+
+      if (st.status === 'processing') {
+        task.step = st.processed_chunks > 0 ? 3 : 2   // 已有向量化进度 → 向量化阶段
+      } else if (st.status === 'success') {
+        task.step = 4
+        task.chunkCount = st.chunk_count || 0
+        stopPolling(task)
+      } else if (st.status === 'failed') {
+        stopPolling(task)
+      }
+    } catch (err) {
+      console.error('轮询任务状态失败:', err)
+      // 网络抖动不中断，连续失败由任务自身超时兜底（此处保留轮询）
+    }
+  }, POLL_INTERVAL_MS)
+}
+
+function stopPolling(task) {
+  if (task.pollTimer) {
+    clearInterval(task.pollTimer)
+    task.pollTimer = null
+  }
+}
+
+// 组件卸载时清理所有轮询定时器
+onUnmounted(() => {
+  uploadTasks.forEach(t => stopPolling(t))
+})
 
 function handleDrop(e) {
   isDragging.value = false
@@ -294,26 +423,56 @@ async function reprocessItem(item) {
       headers: getAuthHeader()
     })
     if (res.data?.code === 200) {
-      item.status = 'success'
-      item.chunk_count = res.data.data.chunk_count
+      // 重处理已入队（异步），立即刷新列表展示 pending/processing 状态
+      item.status = 'pending'
+      item.chunk_count = 0
+      await fetchList()
     }
   } catch (err) {
     console.error('重处理失败:', err)
   }
 }
 
+// ---- Tab 2: Chunks 可视化弹窗 ----
+const showChunksModal = ref(false)
+const chunksLoading = ref(false)
+const chunksData = ref(null)          // { file_name, total_chunks, chunks: [...] }
+
 async function viewChunks(item) {
   try {
+    chunksLoading.value = true
     const res = await axios.get(`/api/admin/knowledge/${item.id}/chunks`, {
       headers: getAuthHeader()
     })
     if (res.data?.code === 200) {
-      // 在控制台输出，后续可扩展为弹窗
-      console.log(`Chunks for ${item.file_name}:`, res.data.data)
-      alert(`${item.file_name} 共 ${res.data.data.total_chunks} 个 chunks，详情见控制台`)
+      chunksData.value = res.data.data
+      showChunksModal.value = true
     }
   } catch (err) {
     console.error('获取 chunks 失败:', err)
+    alert('获取 chunks 失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    chunksLoading.value = false
+  }
+}
+
+function closeChunksModal() {
+  showChunksModal.value = false
+  chunksData.value = null
+}
+
+async function deleteItem(item) {
+  if (!confirm(`确定要删除文档《${item.file_name}》吗？\n将同时删除其全部 ${item.chunk_count} 个向量 chunks，且不可恢复。`)) return
+  try {
+    const res = await axios.delete(`/api/admin/knowledge/${item.id}`, {
+      headers: getAuthHeader()
+    })
+    if (res.data?.code === 200) {
+      await fetchList()
+    }
+  } catch (err) {
+    console.error('删除文档失败:', err)
+    alert('删除失败: ' + (err.response?.data?.detail || err.message))
   }
 }
 
@@ -429,6 +588,18 @@ fetchList()
 .step-arrow { color: var(--text-secondary); }
 .task-error { color: #e74c3c; font-size: 12px; margin-top: 8px; }
 
+/* 异步处理进度条 */
+.task-progress { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.progress-track {
+  flex: 1; height: 6px; border-radius: 3px;
+  background: var(--border-color); overflow: hidden;
+}
+.progress-fill {
+  height: 100%; border-radius: 3px;
+  background: var(--primary); transition: width 0.4s ease;
+}
+.progress-text { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+
 /* ---- Data Table ---- */
 .list-toolbar { display: flex; gap: 10px; margin-bottom: 16px; }
 .search-input { flex: 1; padding: 8px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-color); color: var(--text-primary); font-size: 13px; }
@@ -498,4 +669,83 @@ fetchList()
 }
 .budget-ok { color: #27ae60; font-weight: 500; }
 .budget-over { color: #e74c3c; font-weight: 500; }
+
+.sbs-parents { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.sbs-parent {
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden;
+}
+.sbs-parent.is-concat { border-left: 3px solid #8e44ad; }
+.sbs-parent-head {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  padding: 6px 12px; background: var(--panel-bg); font-size: 12px; color: var(--text-secondary);
+}
+.sbs-source { font-weight: 600; }
+.sbs-parent.is-concat .sbs-source { color: #8e44ad; }
+.sbs-parent pre {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 12px; line-height: 1.6;
+  background: var(--panel-bg); padding: 10px; border-radius: 4px;
+  max-height: 200px; overflow-y: auto; margin: 0;
+}
+.concat-badge { color: #8e44ad; font-weight: 500; }
+
+/* ---- 删除按钮 / 覆盖提示 ---- */
+.btn-danger { color: #e74c3c; }
+.btn-danger:hover { background: #fadbd8; }
+.task-replaced {
+  margin-top: 8px; font-size: 12px; color: #2980b9;
+  background: #ebf5fb; padding: 6px 10px; border-radius: 4px;
+}
+
+/* ---- Chunks 可视化弹窗 ---- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.chunks-modal {
+  width: min(880px, 100%);
+  max-height: 85vh;
+  display: flex; flex-direction: column;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--panel-bg);
+}
+.modal-title { font-weight: 600; font-size: 14px; }
+.modal-sub { font-weight: 400; font-size: 12px; color: var(--text-secondary); margin-left: 8px; }
+.modal-close {
+  border: none; background: none; font-size: 16px;
+  color: var(--text-secondary); cursor: pointer; padding: 4px 8px;
+}
+.modal-close:hover { color: var(--text-primary); }
+.modal-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+.chunk-list { display: flex; flex-direction: column; gap: 12px; }
+.chunk-detail-card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--panel-bg);
+}
+.chunk-detail-head { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
+.chunk-detail-index { font-weight: 700; color: var(--primary); font-size: 13px; }
+.chunk-detail-sec { background: var(--bg-color); padding: 1px 6px; border-radius: 4px; }
+.chunk-detail-path { margin-top: 6px; font-size: 12px; color: var(--primary-hover); }
+.chunk-detail-label { margin-top: 10px; font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+.chunk-detail-pre {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 12px; line-height: 1.6;
+  background: var(--bg-color); padding: 10px; border-radius: 4px;
+  max-height: 220px; overflow-y: auto; margin: 4px 0 0;
+}
+.chunk-detail-parent { margin-top: 8px; }
+.chunk-detail-parent summary { cursor: pointer; font-size: 12px; color: var(--primary); padding: 4px 0; }
+.chunk-detail-noparent { margin-top: 8px; font-size: 12px; color: #8e44ad; }
 </style>

@@ -97,6 +97,25 @@ def seed_safety_warning_samples_from_list():
         db.close()
 
 
+def _ensure_column(table_name: str, column_def: str, db=None):
+    """
+    轻量列迁移：检查表是否已有目标列，缺失则 ALTER TABLE 添加。
+    用于 create_all 无法为已存在表补列的场景（如新增 processed_chunks）。
+    """
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(db or engine)
+        columns = {c["name"] for c in inspector.get_columns(table_name)}
+        col_name = column_def.split()[0].strip("`")
+        if col_name in columns:
+            return
+        with (db or engine).begin() as conn:
+            conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN {column_def}"))
+        logger.info(f"迁移完成: 已为表 {table_name} 添加列 {col_name}")
+    except Exception as e:
+        logger.warning(f"列迁移跳过 ({table_name}.{column_def}): {str(e)}")
+
+
 def init_mysql():
     """
     在应用启动时初始化并建表
@@ -107,6 +126,8 @@ def init_mysql():
         from app.models import User, UserProfile, ChatSession, ChatMessage, KnowledgeImport, SafetyKeyword, SecurityActivityLog, SafetyWarningSample
         Base.metadata.create_all(bind=engine)
         logger.info("MySQL 数据库表结构同步完成。")
+        # 为已存在的表补齐新增列（create_all 只建新表，不会给旧表加列）
+        _ensure_column("knowledge_imports", "`processed_chunks` INT DEFAULT 0 COMMENT '已向量化完成的chunk数'")
         seed_safety_keywords_from_list()
         seed_safety_warning_samples_from_list()
         

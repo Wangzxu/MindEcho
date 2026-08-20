@@ -191,6 +191,78 @@ class SiliconFlowService:
             logger.error(f"获取向量失败 ({self.embedding_model}): {str(e)}")
             return [0.0] * 1024
 
+    def batch_embed(
+        self,
+        texts: List[str],
+        batch_size: int = 100,
+        max_workers: int = 4,
+        max_retries: int = 3
+    ) -> List[List[float]]:
+        """
+        批量向量化：分批 + 并发 + 指数退避重试。
+
+        - 每批最多 batch_size 条文本（默认 100）
+        - 最多 max_workers 个并发批次（默认 4）
+        - 单批失败按 2^n 秒指数退避重试 max_retries 次（默认 3）
+        - Mock 模式 / 最终失败时逐条降级：先返回全零向量，绝不中断主流程
+
+        Returns:
+            List[List[float]]，与 texts 一一对应的向量列表
+        """
+        if not texts:
+            return []
+
+        if not self.embeddings_client:
+            logger.warning(
+                f"运行于 Mock 向量模型模式，批量返回 {len(texts)} 个 1024 维全零向量"
+            )
+            return [[0.0] * 1024 for _ in texts]
+
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        batches = [
+            texts[i:i + batch_size]
+            for i in range(0, len(texts), batch_size)
+        ]
+        results: List[List[float]] = []
+        errors: List[str] = []
+
+        def _embed_batch(batch: List[str]) -> List[List[float]]:
+            """单批嵌入 + 指数退避重试"""
+            last_err = None
+            for attempt in range(max_retries):
+                try:
+                    return self.embeddings_client.embed_documents(batch)
+                except Exception as e:
+                    last_err = e
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt  # 0s, 2s, 4s
+                        logger.warning(
+                            f"批量嵌入第 {attempt + 1} 次失败 ({self.embedding_model}): {str(e)}，"
+                            f"{wait}s 后重试"
+                        )
+                        time.sleep(wait)
+            # 重试耗尽：整批降级为全零向量
+            errors.append(str(last_err))
+            logger.error(
+                f"批量嵌入重试 {max_retries} 次仍失败 ({self.embedding_model}): {last_err}，"
+                f"本批 {len(batch)} 条降级为全零向量"
+            )
+            return [[0.0] * 1024 for _ in batch]
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_embed_batch, b): b for b in batches}
+            # 按提交顺序收集结果，保证与 texts 顺序一致
+            for future in futures:
+                results.extend(future.result())
+
+        logger.info(
+            f"批量向量化完成！模型: {self.embedding_model}，"
+            f"共 {len(texts)} 条 / {len(batches)} 批，失败批次: {len(errors)}"
+        )
+        return results
+
     def classify_intent(self, messages) -> dict:
         """对用户意图进行分类"""
         if not self.simple_chat_client:
