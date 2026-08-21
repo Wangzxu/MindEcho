@@ -19,12 +19,11 @@ class ChatWorkflowState(TypedDict):
     # 累计消息轮数计数器 (用于无痕会话等画像建模判定)
     message_count: int | None
     
-    # 记忆系统的 5 部分装载
-    recent_history: str             # 1. 6轮原始对话历史拼接字符串
-    previous_summary: str           # 2. 其余轮次的历史摘要
-    user_profile: Dict[str, Any]    # 3. 历史人物心理画像
-    semantic_history_recall: str   # 4. 历史会话召回线索
-    rag_cards: List[Dict[str, Any]] # 5. 向量库RAG检索知识卡片
+    # 记忆系统的 4 部分装载（四层记忆架构）
+    recent_history: str             # 1. 最近12条原始对话拼接字符串（窗口层）
+    previous_summary: str           # 2. 中期记忆：窗口之外的会话摘要（内存，不落库）
+    user_profile: Dict[str, Any]    # 3. 长期记忆：用户心理画像（MySQL user_profiles）
+    rag_cards: List[Dict[str, Any]] # 4. 专业RAG检索知识卡片（仅KNOWLEDGE意图）
     
     # 最终大模型回复内容
     response_content: str

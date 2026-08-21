@@ -48,16 +48,6 @@
             </div>
           </div>
         </div>
-
-        <div v-if="msg.sender === 'ai' && msg.recalledMemory && msg.recalledMemory !== '无'" class="memory-recall-section">
-          <div class="memory-section-header">🧠 往期倾诉线索召回：</div>
-          <div class="memory-cards-container">
-            <div v-for="(memo, mIndex) in getSplitMemories(msg.recalledMemory)" :key="mIndex" class="memory-card">
-              <span class="memory-card-icon">💭</span>
-              <p class="memory-card-text">" {{ memo }} "</p>
-            </div>
-          </div>
-        </div>
       </div>
 
       <div v-if="msg.sender === 'user'" class="msg-avatar">👤</div>
@@ -100,11 +90,6 @@ function getIntentLabel(s) {
   if (!s) return ''
   const map = { CRISIS: '⚠️ 安全红线预警', KNOWLEDGE: '📚 专业心理科普', EMOTION: '🍃 情绪宣泄共情' }
   return map[s.toUpperCase()] || s
-}
-
-function getSplitMemories(s) {
-  if (!s || s === '无') return []
-  return s.split(' | ').filter(Boolean)
 }
 </script>
 

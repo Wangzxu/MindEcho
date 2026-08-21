@@ -7,6 +7,8 @@
         {{ isNight ? '☀️' : '🌙' }}
       </button>
     </div>
+
+    <!-- 用户信息 -->
     <div class="user-info">
       <div class="avatar-container">
         <div class="avatar-placeholder">👤</div>
@@ -17,28 +19,42 @@
       </div>
     </div>
 
-    <div class="new-sessions-btn-group">
-      <button class="new-session-btn" @click="$emit('create-session', false)" :disabled="isCreatingSession">
-        ➕ 新建常规对话
+    <!-- 双模式切换（仅两种固定会话：直接聊天 / 无痕树洞） -->
+    <div class="mode-switch">
+      <button
+        class="mode-btn"
+        :class="{ active: activeMode === 'normal' }"
+        @click="$emit('switch-mode', 'normal')"
+      >
+        <span class="mode-icon">💬</span>
+        <span class="mode-label">直接聊天</span>
+        <span class="mode-desc">陪伴倾诉 · 记录存档</span>
       </button>
-      <button class="new-session-btn incognito-btn" @click="$emit('create-session', true)" :disabled="isCreatingSession">
-        🔒 新建无痕树洞
+      <button
+        class="mode-btn incognito"
+        :class="{ active: activeMode === 'incognito' }"
+        @click="$emit('switch-mode', 'incognito')"
+      >
+        <span class="mode-icon">🔒</span>
+        <span class="mode-label">无痕树洞</span>
+        <span class="mode-desc">阅后即焚 · 不落库</span>
       </button>
     </div>
 
-    <div class="sessions-list">
-      <div
-        v-for="session in sessions"
-        :key="session.id"
-        :class="['session-item', activeSessionId === session.id ? 'active' : '']"
-        @click="$emit('select-session', session.id)"
-      >
-        <span class="session-icon">{{ session.is_anonymous ? '🔒' : '💬' }}</span>
-        <span class="session-title" :title="session.title">{{ session.title }}</span>
-        <span v-if="session.is_anonymous" class="incognito-badge">无痕</span>
-      </div>
-      <EmptyState v-if="sessions.length === 0" message="暂无对话，点击上方新建" icon="💬" />
+    <!-- 会话信息（固定名称：直接聊天 / 无痕树洞） -->
+    <div class="session-status">
+      <p class="session-status-title">{{ activeMode === 'incognito' ? '🔒 无痕树洞' : '💬 直接聊天' }}</p>
+      <p class="session-status-desc">
+        {{ activeMode === 'incognito'
+          ? '该模式下的对话仅保存在内存中，关闭页面即物理清除，绝不写入数据库。'
+          : '该模式下的对话会持久化保存，重新打开页面仍可继续。' }}
+      </p>
     </div>
+
+    <!-- 画像可视化入口 -->
+    <button class="profile-btn" @click="$emit('show-profile')">
+      🧠 我的心理画像
+    </button>
 
     <button class="logout-btn" @click="$emit('logout')">🚪 退出登录</button>
   </div>
@@ -46,18 +62,15 @@
 
 <script setup>
 import { useTheme } from '../../composables/useTheme'
-import EmptyState from '../shared/EmptyState.vue'
 
 const { isNight, toggle } = useTheme()
 
 defineProps({
-  sessions: { type: Array, default: () => [] },
-  activeSessionId: { type: String, default: '' },
-  isCreatingSession: { type: Boolean, default: false },
-  nickname: { type: String, default: '同学' }
+  nickname: { type: String, default: '同学' },
+  activeMode: { type: String, default: 'normal' }   // 'normal' | 'incognito'
 })
 
-defineEmits(['select-session', 'create-session', 'logout'])
+defineEmits(['switch-mode', 'show-profile', 'logout'])
 </script>
 
 <style scoped>
@@ -75,33 +88,42 @@ defineEmits(['select-session', 'create-session', 'logout'])
   cursor: pointer; transition: var(--transition-normal);
 }
 .theme-toggle:hover { background: var(--border-color); }
+
 .user-info { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--primary-light); border-radius: var(--radius-md); margin-bottom: 15px; }
 .avatar-placeholder { width: 40px; height: 40px; border-radius: 50%; background: var(--panel-bg); display: flex; justify-content: center; align-items: center; font-size: 20px; }
 .user-nickname { font-weight: 600; font-size: 15px; color: var(--primary-hover); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-role { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 
-.new-sessions-btn-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
-.new-session-btn {
-  width: 100%; padding: 12px; background: var(--primary); color: white; border: none;
-  border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; cursor: pointer;
-  transition: var(--transition-normal); box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+/* 双模式切换 */
+.mode-switch { display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; }
+.mode-btn {
+  width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 13px 15px; border: 1px solid var(--border-color); border-radius: var(--radius-md);
+  background: var(--bg-color); color: var(--text-primary); cursor: pointer; transition: var(--transition-normal);
 }
-.new-session-btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
-.incognito-btn { background: var(--accent); }
-.incognito-btn:hover { background: var(--accent-hover); }
+.mode-btn:hover { background: var(--primary-light); }
+.mode-btn.active { background: var(--primary-light); border-color: var(--primary); color: var(--primary-hover); box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.mode-btn.incognito.active { border-color: var(--accent); background: var(--accent-light); color: var(--accent-hover); }
+.mode-icon { font-size: 15px; }
+.mode-label { font-weight: 600; font-size: 14px; }
+.mode-desc { font-size: 11px; color: var(--text-secondary); }
 
-.sessions-list { flex: 1; overflow-y: auto; margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px; }
-.session-item {
-  display: flex; align-items: center; gap: 10px; padding: 12px 15px;
-  border-radius: var(--radius-md); cursor: pointer; transition: var(--transition-normal);
-  font-size: 14.5px; border: 1px solid transparent; color: var(--text-primary);
+.session-status { padding: 10px 12px; background: var(--bg-color); border-radius: var(--radius-md); margin-bottom: 15px; }
+.session-status-title { font-size: 12.5px; font-weight: 600; color: var(--text-primary); margin-bottom: 3px; }
+.session-status-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+
+/* 画像入口 */
+.profile-btn {
+  width: 100%; padding: 12px; margin-bottom: 15px;
+  background: linear-gradient(135deg, var(--primary-light), var(--accent-light));
+  border: 1px solid var(--border-color); border-radius: var(--radius-md);
+  color: var(--primary-hover); font-size: 13.5px; font-weight: 500; cursor: pointer;
+  transition: var(--transition-normal);
 }
-.session-item:hover { background: rgba(0,0,0,0.02); }
-.session-item.active { background: var(--primary-light); color: var(--primary-hover); border-color: var(--primary); font-weight: 600; }
-.session-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.incognito-badge { font-size: 10px; background: var(--accent); color: white; padding: 2px 6px; border-radius: 10px; }
+.profile-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
 
 .logout-btn {
+  margin-top: auto;
   background: transparent; border: 1px solid var(--border-color); padding: 12px;
   border-radius: var(--radius-md); color: var(--text-primary); font-size: 14px;
   cursor: pointer; transition: var(--transition-normal);

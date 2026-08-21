@@ -16,7 +16,6 @@ class UserProfile(Base):
     core_stressors = Column(JSON, nullable=True, default=list)  # 核心压力源 JSON
     effective_coping_methods = Column(JSON, nullable=True, default=list)  # 历史有效方法 JSON
     entity_relation_map = Column(JSON, nullable=True, default=dict)  # 重要人物关系网络 JSON
-    semantic_history_recall = Column(Text, nullable=True)  # 历史会话合并提炼的摘要线索
     
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -31,5 +30,4 @@ class UserProfile(Base):
             "core_stressors": self.core_stressors or [],
             "effective_coping_methods": self.effective_coping_methods or [],
             "entity_relation_map": self.entity_relation_map or {},
-            "semantic_history_recall": self.semantic_history_recall or ""
         }

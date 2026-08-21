@@ -37,7 +37,6 @@ class UserProfileResponse(BaseModel):
     core_stressors: List[str]
     effective_coping_methods: List[str]
     entity_relation_map: Dict[str, str]
-    semantic_history_recall: Optional[str]
 
     class Config:
         from_attributes = True

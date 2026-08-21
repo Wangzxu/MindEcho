@@ -50,7 +50,6 @@ def seed_test_data():
                 core_stressors=s["stressors"],
                 effective_coping_methods=s["coping"],
                 entity_relation_map={"期末考": "焦虑", "水豚委员": "信任倾听"},
-                semantic_history_recall=f"测试画像：该生由于 {', '.join(s['stressors'])} 产生了一定程度的轻度心理压力。豚豚对其进行了同理倾听并提供了自我调节技巧。"
             )
             db.add(profile)
             users.append(user)
@@ -58,12 +57,12 @@ def seed_test_data():
             
         db.commit()
         
-        # 2. 批量创建聊天会话 (关联会话与匿名树洞会话)
+        # 2. 批量创建聊天会话 (固定双会话：直接聊天 / 无痕树洞)
         sessions = []
         session_configs = [
-            {"user_id": users[0].id, "title": "学业考前情绪倾诉", "is_anonymous": False},
-            {"user_id": users[1].id, "title": "寝室关系适应讨论", "is_anonymous": False},
-            {"user_id": None, "title": "无痕匿名情绪发泄树洞", "is_anonymous": True}
+            {"user_id": users[0].id, "title": "直接聊天", "is_anonymous": False},
+            {"user_id": users[1].id, "title": "直接聊天", "is_anonymous": False},
+            {"user_id": None, "title": "无痕树洞", "is_anonymous": True}
         ]
         
         for idx, sc in enumerate(session_configs):

@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from config import Config
 from app.database.mysql import get_db
-from app.models import User, UserProfile
+from app.models import User, UserProfile, ChatSession
 from app.schemas.auth import UserRegister, UserLogin, TokenResponse, UserResponse
 from app.schemas.base import Result
 from app.services.auth_service import auth_service
@@ -107,9 +107,21 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
             core_stressors=[],
             effective_coping_methods=[],
             entity_relation_map={},
-            semantic_history_recall=""
         )
         db.add(new_profile)
+
+        # 5. 注册即为该用户创建两个固定会话：
+        #    「直接聊天」= 常规持久会话（落库）；「无痕树洞」= 无痕会话（仅内存，阅后即焚）
+        db.add(ChatSession(
+            user_id=new_user.id,
+            title="直接聊天",
+            is_anonymous=False
+        ))
+        db.add(ChatSession(
+            user_id=new_user.id,
+            title="无痕树洞",
+            is_anonymous=True
+        ))
         
         db.commit()
         db.refresh(new_user)
@@ -169,3 +181,31 @@ def login_user(data: UserLogin, db: Session = Depends(get_db)):
         data=TokenResponse(access_token=access_token),
         message="登录成功"
     )
+
+
+@auth_bp.get("/profile", response_model=Result[dict])
+def get_my_profile(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    获取当前登录用户的个人心理画像（用户端可视化）。
+    返回昵称、核心压力源、历史有效应对方法、关键关系网。
+    """
+    try:
+        profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
+        if not profile:
+            return Result.success(
+                data={
+                    "user_id": current_user.id,
+                    "nickname": current_user.username,
+                    "core_stressors": [],
+                    "effective_coping_methods": [],
+                    "entity_relation_map": {},
+                },
+                message="暂未生成心理画像"
+            )
+        return Result.success(data=profile.to_dict(), message="获取心理画像成功")
+    except Exception as e:
+        logger.error(f"获取当前用户画像失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取画像失败: {str(e)}")

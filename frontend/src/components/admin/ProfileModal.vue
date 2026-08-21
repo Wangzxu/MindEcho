@@ -40,11 +40,6 @@
               <pre>{{ formatJSON(profile?.entity_relation_map) }}</pre>
             </div>
           </div>
-
-          <div class="profile-section">
-            <h4>📖 语义历史总括</h4>
-            <p class="semantic-history">{{ profile?.semantic_history_recall || '暂无语义历史，倾诉对话达到6轮后，AI将自动进行长期记忆汇总。' }}</p>
-          </div>
         </div>
         <div class="modal-footer">
           <button class="btn-primary" @click="$emit('close')">关闭窗口</button>
@@ -183,17 +178,6 @@ function formatJSON(val) {
   font-size: 12.5px;
   color: var(--text-primary);
   white-space: pre-wrap;
-  text-align: left;
-}
-.semantic-history {
-  font-size: 13.5px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-  background-color: var(--bg-color);
-  padding: 12px 16px;
-  border-radius: var(--radius-sm);
-  border-left: 4px solid var(--primary);
-  margin: 0;
   text-align: left;
 }
 .modal-footer {

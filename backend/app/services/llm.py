@@ -42,29 +42,11 @@ class IntentResponse(BaseModel):
     intent: Literal["KNOWLEDGE", "EMOTION", "CRISIS"] = Field(description="意图分类结果，必须是 KNOWLEDGE（科普咨询）、EMOTION（情绪宣泄闲聊）或 CRISIS（有自残、自杀倾向或严重心理危机之一）")
     reason: str = Field(description="分类的理由说明")
 
-class MeaningfulResponse(BaseModel):
-    is_meaningful: bool = Field(description="是否包含具体心理感受、生活烦恼、人际困扰或具有心理学分析价值的信息")
-
 class UserProfileResponse(BaseModel):
     nickname: str = Field(description="用户昵称")
     core_stressors: List[str] = Field(description="核心压力源列表")
     effective_coping_methods: List[str] = Field(description="历史有效应对方法列表")
     entity_relation_map: Dict[str, str] = Field(description="关键人际关系网络字典")
-
-class StructuredMemory(BaseModel):
-    is_valuable: bool = Field(description=(
-        "该输入是否包含【具体的、有长期存储和后续追踪价值的个人背景、生活细节、生活事件、人际关系或应对行为特征】。"
-        "如果仅是泛泛的、没有具体事件/细节的日常闲聊或情绪宣泄发泄（例如‘我好烦’、‘太难受了’、‘开心’、‘你好’、‘谢谢’），"
-        "必须设为 false。"
-    ))
-    recalled_text: str = Field(description=(
-        "适合用于历史回忆的标准化客观结构陈述，必须使用固定模板生成："
-        "‘涉及主体核心事心理感受组成一句话，比如：用户喜欢看书’"
-    ))
-
-class DuplicateCheckResponse(BaseModel):
-    is_duplicate: bool = Field(description="新提炼的记忆内容是否与已有的任意一条历史记忆在语义上重复、相似或被其完全覆盖。如果是，返回 true，否则返回 false")
-    reason: str = Field(description="简短的查重理由说明")
 
 class SiliconFlowService:
     """基于 LangChain 的硅基流动 (SiliconFlow) 大模型服务封装"""
@@ -84,10 +66,7 @@ class SiliconFlowService:
         
         # 结构化输出包装客户端
         self.intent_classifier = None
-        self.meaningful_judge = None
         self.profile_extractor = None
-        self.memory_extractor = None
-        self.duplicate_checker = None
         
         # 自动执行初始化
         self.init_service()
@@ -108,10 +87,7 @@ class SiliconFlowService:
             self.complex_chat_client = None
             self.summary_chat_client = None
             self.intent_classifier = None
-            self.meaningful_judge = None
             self.profile_extractor = None
-            self.memory_extractor = None
-            self.duplicate_checker = None
         else:
             try:
                 # 初始化 LangChain 向量嵌入客户端
@@ -157,10 +133,7 @@ class SiliconFlowService:
                 self.complex_chat_client = None
                 self.summary_chat_client = None
                 self.intent_classifier = None
-                self.meaningful_judge = None
                 self.profile_extractor = None
-                self.memory_extractor = None
-                self.duplicate_checker = None
 
     def _convert_to_lc_messages(self, messages):
         """将原生的角色/文本词典结构列表转换为 LangChain 的 Message 对象列表"""
@@ -305,38 +278,6 @@ class SiliconFlowService:
             logger.error(f"结构化意图分类调用失败: {str(e)}")
             return {"intent": "EMOTION", "reason": "接口异常降级"}
 
-    def judge_meaningful(self, messages) -> bool:
-        """判断消息是否有心理学分析价值"""
-        if not self.simple_chat_client:
-            return True
-            
-        try:
-            parser = PydanticOutputParser(pydantic_object=MeaningfulResponse)
-            format_instructions = (
-                "请返回一个 JSON 对象，必须包含 \"is_meaningful\" 字段。请直接输出合法的 JSON 代码，不要包含 JSON Schema 定义或格式说明。数字/布尔值请遵循相应类型。示例如下：\n"
-                "{\n"
-                "  \"is_meaningful\": true 或 false\n"
-                "}"
-            )
-            
-            modified_messages = []
-            for msg in messages:
-                if msg.get("role") == "system":
-                    modified_messages.append({
-                        "role": "system",
-                        "content": msg.get("content", "") + f"\n\n【格式规范】\n{format_instructions}"
-                    })
-                else:
-                    modified_messages.append(msg)
-                    
-            lc_msgs = self._convert_to_lc_messages(modified_messages)
-            response = self.simple_chat_client.invoke(lc_msgs)
-            parsed_res = parser.parse(response.content)
-            return bool(parsed_res.is_meaningful)
-        except Exception as e:
-            logger.error(f"结构化特征评估调用失败: {str(e)}")
-            return False
-
     def extract_profile(self, messages) -> dict:
         """提取/合并用户画像特征"""
         if not self.simple_chat_client:
@@ -400,90 +341,6 @@ class SiliconFlowService:
             logger.error(f"简单模型调用失败 ({self.simple_model}): {str(e)}")
             raise e
 
-    def extract_structured_memory(self, messages) -> dict:
-        """从用户发言中提取结构化记忆特征"""
-        if not self.simple_chat_client:
-            logger.info("模型加载失败，直接跳过")
-            return {"is_valuable":False, "recalled_text":""}
-            
-        try:
-            # 1. 强依赖 Pydantic 自身的格式生成器，确保标准 Schema
-            # parser = PydanticOutputParser(pydantic_object=StructuredMemory)
-            # pydantic_instructions = parser.get_format_instructions()
-            
-            # 2. 精简、明确的 Few-Shot 提示词（直接针对 9B 模型做特化）
-            system_rules = (
-                "请返回一个 JSON 对象，必须包含 \"is_valuable\" 和 \"recalled_text\" 字段。\n"
-                "is_valuable: 你的唯一任务是从对话中提炼出需要长期沉淀的【个人背景、兴趣喜好、客观事实与核心状态】，拒绝无事实背景的纯情绪发泄。有就为true，反之为false\n"
-                "recalled_text: 当is_valuable为true时填入内容摘要，反之可以为空\n"
-                "请直接输出合法的 JSON 代码，不要包含 JSON Schema 定义或格式说明。数字/布尔值请遵循相应类型。示例如下：\n"
-                "{\n"
-                "  \"is_valuable\": \"false\" 或 \"true\",\n"
-                "  \"recalled_text\": \"当is_valuable为true时填入内容摘要，反之可以为空\"\n"
-                "}"
-            )
-            
-            # 3. 安全健壮地注入 System Prompt
-            modified_messages = []
-            has_system = False
-            for msg in messages:
-                if msg.get("role") == "system":
-                    modified_messages.append({
-                        "role": "system",
-                        "content": f"{msg.get('content', '')}\n\n{system_rules}"
-                    })
-                    has_system = True
-                else:
-                    modified_messages.append(msg)
-                    
-            # 如果传入的上下文中没有 System 消息，务必手动在队头补上
-            if not has_system:
-                modified_messages.insert(0, {"role": "system", "content": system_rules})
-                    
-            # 4. 调用模型
-            lc_msgs = self._convert_to_lc_messages(modified_messages)
-            llm = self.simple_chat_client.with_structured_output(StructuredMemory)
-            response = llm.invoke(lc_msgs)
-            return response
-        except Exception as e:
-            logger.error(f"提取结构化记忆特征面临严重崩溃: {str(e)}")
-            return {"is_valuable":False, "recalled_text":""}
-
-    def check_memory_duplicate(self, new_memory: str, existing_memories: List[str]) -> bool:
-        """使用大模型判断新记忆是否与已有记忆重复"""
-        if not self.simple_chat_client:
-            logger.warning("运行于 Mock 查重模式。")
-            return False
-            
-        try:
-            parser = PydanticOutputParser(pydantic_object=DuplicateCheckResponse)
-            format_instructions = (
-                "请返回一个 JSON 对象，必须包含 \"is_duplicate\" 和 \"reason\" 字段。请直接输出合法的 JSON 代码，不要包含 JSON Schema 定义或格式说明。数字/布尔值请遵循相应类型。示例如下：\n"
-                "{\n"
-                "  \"is_duplicate\": true 或 false,\n"
-                "  \"reason\": \"判定理由\"\n"
-                "}"
-            )
-            
-            prompt = [
-                {"role": "system", "content": (
-                    "你是一个心理咨询记忆系统的语义查重专家。你需要比对一条【新提炼的记忆】与一组【已有的历史记忆】，"
-                    "判断新记忆是否在语义上与历史记忆中的某一条重复、高度相似，或者已被其完全覆盖（例如，只是措辞微调，但反映的事件、情绪和关系完全一致）。\n"
-                    f"【格式规范】\n{format_instructions}"
-                )},
-                {"role": "user", "content": (
-                    f"【已有的历史记忆】:\n" + "\n".join([f"- {m}" for m in existing_memories]) + f"\n\n"
-                    f"【新提炼的记忆】:\n{new_memory}"
-                )}
-            ]
-            lc_msgs = self._convert_to_lc_messages(prompt)
-            response = self.simple_chat_client.invoke(lc_msgs)
-            parsed_res = parser.parse(response.content)
-            logger.info(f"大模型语义查重判定: 重复={parsed_res.is_duplicate}, 原因={parsed_res.reason}")
-            return parsed_res.is_duplicate
-        except Exception as e:
-            logger.error(f"语义查重调用失败: {str(e)}")
-            return False
     def call_complex_model_stream(self, messages, temperature=0.7, max_tokens=1024):
         """利用 LangChain ChatOpenAI.stream 唤起生成回复大模型，输出流式迭代生成器"""
         if not self.complex_chat_client:

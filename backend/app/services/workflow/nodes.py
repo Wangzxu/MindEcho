@@ -9,15 +9,17 @@ from app.services.llm import llm_service
 from app.services.rag import rag_service
 from app.database.vector import vector_db
 from app.database.mysql import SessionLocal
-from app.models import ChatSession, ChatMessage, SecurityActivityLog, SafetyKeyword, UserProfile
+from app.models import ChatMessage, SecurityActivityLog, SafetyKeyword, UserProfile
 from app.services.workflow.state import ChatWorkflowState
 
 logger = logging.getLogger(__name__)
 
 # Removed safe_parse_json in favor of LangChain native structured output (.with_structured_output).
 
-# 内存版匿名会话摘要缓存，结构: { [session_id]: summary_str }
-anonymous_summaries_map = {}
+# 中期记忆（会话摘要）内存缓存：不落库，服务重启即清空
+# 作用：存储 12 轮（窗口）之外的对话摘要，应对高强度连续聊天时的上下文丢失
+# 结构: { [session_id]: summary_str }（无痕与常规会话共用）
+midterm_summaries_map = {}
 
 async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig) -> Dict[str, Any]:
     """
@@ -110,27 +112,7 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
             except Exception as ve:
                 logger.error(f"预警向量库语义检索异常: {ve}")
 
-        # 自动生成会话标题 (若是默认的初始化标题，根据首条消息提炼并更新)
-        new_title = None
-        session = None
-        try:
-            logger.info("[filter_and_route_node] 准备更新/概括会话标题...")
-            session = db.query(ChatSession).get(session_id)
-            if session and session.title in ["新对话", "无痕新对话"]:
-                title_prompt = [
-                    {"role": "system", "content": "你是一个会话标题生成器。请根据用户的输入，生成一个简短、概括性的会话标题（不超过 8 个字），不要包含任何标点符号、两边引号或任何解释性文字。"},
-                    {"role": "user", "content": user_input}
-                ]
-                logger.info("[filter_and_route_node] 准备调用 llm_service.call_simple_model 生成标题...")
-                generated_title = llm_service.call_simple_model(title_prompt, temperature=0.3, max_tokens=20)
-                generated_title = generated_title.strip().replace('"', '').replace("'", "").replace("“", "").replace("”", "")
-                if generated_title:
-                    session.title = generated_title
-                    db.commit()
-                    new_title = generated_title
-                    logger.info(f"会话标题自动概括更新成功: {generated_title}")
-        except Exception as te:
-            logger.error(f"自动生成会话标题异常: {te}")
+        # 会话标题为固定名称（直接聊天/无痕树洞），注册时创建，不再自动生成
 
         # A. 更新用户消息的 intent 进 MySQL (如果是非无痕会话且 user_msg_id 存在)
         if not is_anonymous and user_msg_id:
@@ -160,74 +142,7 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                 db.rollback()
                 logger.error(f"写入安全事件日志异常: {dbe}")
 
-        # C. 过滤无意义日常闲聊与语气词，并提取结构化记忆，判断是否需要嵌入该条聊天记录为语义召回
-        # 仅针对登录用户 (current_user_id 存在)
-        if intent != "CRISIS" and current_user_id:
-            logger.info("[filter_and_route_node] 准备评估并提取有心理分析价值的结构化记忆...")
-            try:
-                memory_messages = [
-                    {"role": "system", "content": (
-                        "你是一个心理咨询系统的特征分析网关。请分析用户的当前输入，判断其是否包含具体的、有长期存储和后续追踪价值的个人背景、生活细节、生活事件、人际关系或应对行为特征。\n"
-                        "【过滤标准】若用户仅是进行单纯的情绪宣泄发泄（如‘我好难过’、‘我好烦’、‘开心’、‘太垃圾了’）或日常闲聊问候（如‘你好’、‘在吗’），而没有透露任何具体的背景事件或细节，必须判定为 is_valuable 为 false。\n"
-                        "如果 is_valuable 为 true，请将提取的细节提炼并拼接为适合回忆的客观陈述（格式：‘【涉及主体】xxx 【核心事件】xxx 【心理感受】xxx 【相关细节】xxx 【应对方式】xxx’）。如果 is_valuable 为 false，recalled_text 请填空字符串。"
-                    )},
-                    {"role": "user", "content": user_input}
-                ]
-                logger.info("[filter_and_route_node] 准备调用 llm_service.extract_structured_memory...")
-                extracted_mem = llm_service.extract_structured_memory(memory_messages)
-                logger.info(f"[filter_and_route_node] extract_structured_memory 成功: is_valuable={extracted_mem.is_valuable}")
-                
-                if extracted_mem.is_valuable:
-                    recalled_text = extracted_mem.recalled_text.strip()
-                    if recalled_text:
-                        logger.info(f"经评估该用户输入具备心理特征分析价值。提炼事件: {extracted_mem.recalled_text}")
-                        
-                        # 生成提炼文本的向量嵌入
-                        logger.info("[filter_and_route_node] 准备生成记忆提炼文本的向量嵌入...")
-                        embedding_vector = llm_service.get_embedding(recalled_text)
-                        collection = vector_db.get_collection("user_history_recall_kb")
-                        
-                        # 检查向量数据库中是否存在相似的历史记录，防重 (查询 top 3)
-                        results = collection.query(
-                            query_embeddings=[embedding_vector],
-                            n_results=3,
-                            where={"user_id": current_user_id}
-                        )
-                        is_duplicate = False
-                        if results and results.get("distances") and len(results["distances"][0]) > 0:
-                            distances = results["distances"][0]
-                            documents = results["documents"][0]
-                            min_distance = distances[0]
-                            
-                            # 阶段一：若向量距离极其接近，直接拦截
-                            if min_distance < 0.15:
-                                is_duplicate = True
-                                logger.info(f"检测到极高相似度的往期记忆 (向量距离: {min_distance:.4f})，直接跳过写入。")
-                            # 阶段二：若向量距离在灰色区间，启动大模型进行语义查重复核
-                            elif min_distance < 0.45:
-                                logger.info(f"检测到相似往期记忆候选 (最小距离: {min_distance:.4f})，启动大模型语义查重复核...")
-                                existing_candidates = documents[:3]
-                                is_duplicate = llm_service.check_memory_duplicate(recalled_text, existing_candidates)
-                                if is_duplicate:
-                                    logger.info(f"大模型判定新记忆与已有历史记忆语义重复，跳过写入。")
-                        
-                        if not is_duplicate:
-                            import uuid
-                            collection.add(
-                                embeddings=[embedding_vector],
-                                documents=[recalled_text],
-                                ids=[str(uuid.uuid4())],
-                                metadatas=[{
-                                    "user_id": current_user_id, 
-                                    "session_id": session_id,
-                                    "recalled_text": extracted_mem.recalled_text
-                                }]
-                            )
-                            logger.info(f"成功将提炼后的检索句写入 ChromaDB 用户专属语义记忆库: '{recalled_text}'")
-            except Exception as e:
-                logger.error(f"评估并嵌入用户聊天记录异常: {e}")
-
-        # D. 将元数据事件推入队列 (CRISIS 分支直接在此处推入)
+        # C. 将元数据事件推入队列 (CRISIS 分支直接在此处推入)
         if intent == "CRISIS" and queue:
             logger.info("[filter_and_route_node] 触发危机分支，将危机元数据放入队列...")
             await queue.put({
@@ -235,8 +150,7 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                 "data": {
                     "intent": intent, 
                     "reason": reason, 
-                    "rag_cards": [],
-                    "new_title": new_title or (session.title if session else None)
+                    "rag_cards": []
                 }
             })
 
@@ -287,38 +201,17 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
             role_name = "学生" if m["sender"] == 'user' else "AI"
             recent_history += f"- {role_name}: {m['content']}\n"
 
-        # 2. 其余轮次的历史摘要 (无痕从内存读，常规从 mysql 读)
-        if state.get("is_anonymous", False):
-            previous_summary = anonymous_summaries_map.get(session_id, "无往期历史。")
-        else:
-            session = db.query(ChatSession).get(session_id)
-            previous_summary = session.summary if session and session.summary else "无往期历史。"
+        # 2. 中期记忆：12 轮之外的对话摘要（内存存储，不落库；服务重启后仅剩窗口+画像）
+        previous_summary = midterm_summaries_map.get(session_id, "无往期历史。")
 
-        # 3. 历史人物画像 & 4. 历史会话召回线索 (利用 ChromaDB 检索 user_history_recall_kb 召回)
+        # 3. 长期画像（唯一长期记忆源，MySQL user_profiles）
         user_profile = {}
-        semantic_history_recall = "无"
         if current_user_id:
             profile = db.query(UserProfile).filter(UserProfile.user_id == current_user_id).first()
             if profile:
                 user_profile = profile.to_dict()
-                
-            # 语义召回线索 (ChromaDB)
-            try:
-                query_vector = state.get("user_input_embedding")
-                if query_vector is None:
-                    query_vector = llm_service.get_embedding(user_input)
-                collection = vector_db.get_collection("user_history_recall_kb")
-                results = collection.query(
-                    query_embeddings=[query_vector],
-                    n_results=3,
-                    where={"user_id": current_user_id}
-                )
-                if results and results.get("documents") and len(results["documents"][0]) > 0:
-                    semantic_history_recall = " | ".join(results["documents"][0])
-            except Exception as re:
-                logger.error(f"历史语义检索召回失败: {re}")
 
-        # 5. 专业 RAG 科普知识库检索
+        # 4. 专业 RAG 科普知识库检索（仅 KNOWLEDGE 意图）
         rag_cards = []
         if intent == "KNOWLEDGE":
             query_vector = state.get("user_input_embedding")
@@ -332,9 +225,7 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
             meta_event = {
                 "intent": intent,
                 "reason": state.get("intent_reason", "意图识别完成"),
-                "rag_cards": rag_cards,
-                "new_title": session.title if session else None,
-                "semantic_history_recall": semantic_history_recall
+                "rag_cards": rag_cards
             }
             await queue.put({"type": "metadata", "data": meta_event})
 
@@ -342,7 +233,6 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
             "recent_history": recent_history,
             "previous_summary": previous_summary,
             "user_profile": user_profile,
-            "semantic_history_recall": semantic_history_recall,
             "rag_cards": rag_cards,
             "history_messages": history
         }
@@ -405,7 +295,6 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
     core_stressors = ", ".join(state["user_profile"].get("core_stressors", [])) or "未明确"
     effective_coping_methods = ", ".join(state["user_profile"].get("effective_coping_methods", [])) or "未明确"
     entity_relation_map = ", ".join([f"{k}:{v}" for k, v in state["user_profile"].get("entity_relation_map", {}).items()]) or "无"
-    semantic_history_recall = state["semantic_history_recall"]
     previous_summary = state["previous_summary"]
     recent_history = state["recent_history"]
 
@@ -421,13 +310,12 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
         f"- 用户昵称: {nickname}\n"
         f"- 核心压力源: {core_stressors}\n"
         f"- 历史有效技巧: {effective_coping_methods}\n"
-        f"- 关键关系网: {entity_relation_map}\n"
-        f"- 历史会话召回线索: {semantic_history_recall}\n\n"
+        f"- 关键关系网: {entity_relation_map}\n\n"
         "【专业知识库检索内容（若有，请按需润色结合）】\n"
         f"{rag_text or '无相关知识卡片。'}\n\n"
-        f"【会话历史记录（短期记忆）】\n"
-        f"- 6轮以前的历史摘要: {previous_summary}\n"
-        f"- 最近的对话历史:\n{recent_history or '无往期历史。'}"
+        "【会话历史记录】\n"
+        f"- 中期记忆（12轮之外的对话摘要）: {previous_summary}\n"
+        f"- 最近对话窗口:\n{recent_history or '无往期历史。'}"
     )
 
     messages = [
@@ -516,8 +404,11 @@ async def update_profile_background(current_user_id: int, history_segment: List[
         db.close()
 
 
-async def compress_summary_background(session_id: str, to_compress_segment: List[Dict[str, str]], is_anonymous: bool = False):
-    """后台进行滚动上下文摘要生成与压缩"""
+async def compress_summary_background(session_id: str, to_compress_segment: List[Dict[str, str]]):
+    """
+    后台进行滚动上下文摘要生成与压缩（中期记忆，内存存储不落库）。
+    将窗口（12条）之外的较老对话压缩为摘要，应对高强度连续聊天时的上下文丢失。
+    """
     db = SessionLocal()
     try:
         logger.info(f"后台任务启动：开始对会话 {session_id} 进行滚动会话摘要压缩...")
@@ -526,17 +417,10 @@ async def compress_summary_background(session_id: str, to_compress_segment: List
         for m in to_compress_segment:
             role = "学生" if m["sender"] == 'user' else "AI"
             compress_text += f"{role}: {m['content']}\n"
-        
-        # 针对无痕和常规获取上一次的摘要以作大模型参考
-        if is_anonymous:
-            old_summary = anonymous_summaries_map.get(session_id, "无往期历史摘要。")
-        else:
-            session = db.query(ChatSession).get(session_id)
-            if not session:
-                logger.warning(f"后台会话摘要压缩失败，会话 {session_id} 不存在")
-                return
-            old_summary = session.summary if session.summary else "无往期历史摘要。"
-        
+
+        # 取上一次的中期摘要作参考（内存）
+        old_summary = midterm_summaries_map.get(session_id, "无往期历史摘要。")
+
         summary_messages = [
             {"role": "system", "content": (
                 "你是一个会话摘要总结专家。请结合已有的旧摘要和最近新发生的对话段落，将这些较老的对话细节以精简的客观心理学总结合并记录。\n"
@@ -544,22 +428,14 @@ async def compress_summary_background(session_id: str, to_compress_segment: List
             )},
             {"role": "user", "content": f"【往期历史摘要】:\n{old_summary}\n\n【最新已沉淀对话】:\n{compress_text}"}
         ]
-        
+
         # 运行同步阻塞方法在大模型服务的线程池中，避免阻塞主事件循环
         new_summary = await asyncio.to_thread(llm_service.call_summary_model, summary_messages, temperature=0.3)
-        
+
         if new_summary:
-            if is_anonymous:
-                # 匿名/无痕树洞会话，仅同步至内存 map 缓存，不同步至 MySQL
-                anonymous_summaries_map[session_id] = new_summary
-                logger.info(f"后台任务完成：无痕会话 {session_id} 滚动摘要压缩成功并已存入内存缓存")
-            else:
-                # 常规会话，同步至 MySQL
-                session = db.query(ChatSession).get(session_id)
-                if session:
-                    session.summary = new_summary
-                    db.commit()
-                    logger.info(f"后台任务完成：常规会话 {session_id} 滚动摘要压缩成功并已同步至 MySQL")
+            # 中期记忆统一存内存，不落库（无痕与常规会话一致；服务重启即清空）
+            midterm_summaries_map[session_id] = new_summary
+            logger.info(f"后台任务完成：会话 {session_id} 中期摘要压缩成功并已存入内存缓存")
     except Exception as se:
         db.rollback()
         logger.error(f"后台滚动上下文摘要压缩异常: {se}")
@@ -635,13 +511,13 @@ async def save_message_node(state: ChatWorkflowState, config: RunnableConfig) ->
 
             asyncio.create_task(update_profile_background(current_user_id, history_segment))
 
-        # C. 上下文压缩：当缓存中消息轮次超出 10 轮 (20 条消息) 时，触发滚动 Summary 压缩（后台异步）
-        # 每次裁剪后仍保留最新的 6 轮 (12 条消息) 作为活跃上下文窗口，分批压缩以避免每轮都调用 LLM 造成资源浪费
+        # C. 上下文压缩：当缓存中消息超出 12 条（窗口）时，把窗口之外的对话滚动压缩为中期摘要（内存）
+        # 每次裁剪后保留最新的 12 条作为活跃上下文窗口，分批压缩以避免每轮都调用 LLM 造成资源浪费
         if len(history) > 20:
             to_compress = list(history[:-12])
             keep_window = list(history[-12:])
-            logger.info(f"活跃会话已达 {len(history)} 条消息，裁剪状态窗口并触发后台分批滚动会话摘要压缩...")
-            asyncio.create_task(compress_summary_background(session_id, to_compress, is_anonymous))
+            logger.info(f"活跃会话已达 {len(history)} 条消息，裁剪状态窗口并触发后台滚动中期摘要压缩...")
+            asyncio.create_task(compress_summary_background(session_id, to_compress))
 
     finally:
         db.close()

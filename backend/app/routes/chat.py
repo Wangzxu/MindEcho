@@ -121,7 +121,6 @@ async def send_message(
             "recent_history": "",
             "previous_summary": "",
             "user_profile": {},
-            "semantic_history_recall": "",
             "rag_cards": [],
             "response_content": ""
         }

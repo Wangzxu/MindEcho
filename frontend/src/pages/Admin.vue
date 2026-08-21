@@ -88,8 +88,7 @@ const selectedUserForProfile = ref(null)
 const selectedUserProfile = ref({
   core_stressors: [],
   effective_coping_methods: [],
-  entity_relation_map: {},
-  semantic_history_recall: ''
+  entity_relation_map: {}
 })
 
 const menus = [
@@ -158,7 +157,7 @@ async function fetchUsers() {
 
 async function viewUserProfile(user) {
   selectedUserForProfile.value = user
-  selectedUserProfile.value = { core_stressors: [], effective_coping_methods: [], entity_relation_map: {}, semantic_history_recall: '正在加载...' }
+  selectedUserProfile.value = { core_stressors: [], effective_coping_methods: [], entity_relation_map: {} }
   try {
     const res = await axios.get(`/api/admin/students/${user.id}/profile`, { headers: getAuthHeader() })
     if (res.data?.code === 200) selectedUserProfile.value = res.data.data
