@@ -6,42 +6,56 @@
 
 ## 一、 MySQL 关系型数据库结构规约
 
-MySQL 主要管理系统的核心业务数据、结构化画像及聊天流水。共包含以下 4 张核心物理表。
+MySQL 主要管理系统的核心业务数据、结构化画像及聊天流水。核心物理表如下。
 
-### 1. 用户画像与基本信息表 (`users`)
-*   **用途**：记录学生基本账号信息，并持久化结构化的长期心理画像（包含核心压力源、历史验证有效的疏导方法等长期记忆字段，用于动态组装 LLM 对话上下文）。
+### 1. 用户账号表 (`users`)
+
+*   **用途**：仅存储账号凭证与角色，实现与心理画像（`user_profiles`）的 1:1 隐私隔离。
 *   **结构定义**：
 
 | 字段名称 | 数据类型 | 约束条件 | 默认值 | 描述说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `INT` | Primary Key, Auto Increment | - | 用户唯一自增 ID |
 | `username` | `VARCHAR(80)` | Unique, Not Null, Index | - | 登录账号/学号唯一标识 |
-| `nickname` | `VARCHAR(80)` | Nullable | Null | 显示昵称（如“小明同学”） |
+| `password_hash` | `VARCHAR(255)` | Not Null | - | Bcrypt 加盐哈希密码 |
+| `role` | `VARCHAR(20)` | Not Null | `student` | 角色（`student` 学生 / `admin` 管理员） |
+| `is_active` | `BOOLEAN` | Not Null | `True` | 激活状态 |
 | `created_at` | `DATETIME` | Not Null | `CURRENT_TIMESTAMP` | 账号创建时间 |
-| `core_stressors` | `JSON` | Nullable | `[]` | 核心压力源（如学业、人际，以 JSON 数组形式管理） |
+
+### 2. 用户心理画像表 (`user_profiles`)
+
+*   **用途**：存储敏感的心理特征长期记忆（唯一长期记忆源），与 `users` 1:1 关联。
+*   **结构定义**：
+
+| 字段名称 | 数据类型 | 约束条件 | 默认值 | 描述说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | `INT` | Primary Key, Auto Increment | - | 画像唯一自增 ID |
+| `user_id` | `INT` | Foreign Key (`users.id`), Unique, Not Null | - | 关联用户（1:1） |
+| `nickname` | `VARCHAR(80)` | Nullable | Null | 显示昵称 |
+| `core_stressors` | `JSON` | Nullable | `[]` | 核心压力源（JSON 数组） |
 | `effective_coping_methods` | `JSON` | Nullable | `[]` | 历史验证有效的心理调节方法 |
-| `entity_relation_map` | `JSON` | Nullable | `{}` | 重要人际关系映射（键值对，如 `{"导师": "张教授"}`） |
-| `semantic_history_recall` | `TEXT` | Nullable | Null | 历次会话结束后，经大模型压缩提取的历史会话总结线索 |
+| `entity_relation_map` | `JSON` | Nullable | `{}` | 重要人际关系映射 |
+| `updated_at` | `DATETIME` | - | `CURRENT_TIMESTAMP` | 画像更新时间 |
 
----
+> 注：`semantic_history_recall` 字段已随"语义向量召回链路"整体移除（见技术细节 02）。
 
-### 2. 聊天会话主表 (`chat_sessions`)
-*   **用途**：管理学生的聊天会话，支持会话标题重命名与“无痕树洞”阅后即焚标识。
+### 3. 聊天会话主表 (`chat_sessions`)
+
+*   **用途**：管理学生的聊天会话。**每个用户注册时固定创建两个会话**（`直接聊天` 落库 / `无痕树洞` 不落库）。
 *   **结构定义**：
 
 | 字段名称 | 数据类型 | 约束条件 | 默认值 | 描述说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | `VARCHAR(36)` | Primary Key | UUID | 会话 UUID 字符串 |
 | `user_id` | `INT` | Foreign Key (`users.id`), Nullable | Null | 关联用户（匿名树洞会话此字段为空） |
-| `title` | `VARCHAR(255)` | Not Null | `"新对话"` | 会话名称 |
+| `title` | `VARCHAR(255)` | Not Null | `"新对话"` | 固定会话名（`直接聊天` / `无痕树洞`） |
 | `created_at` | `DATETIME` | Not Null | `CURRENT_TIMESTAMP` | 会话建立时间 |
-| `summary` | `TEXT` | Nullable | Null | 本次对话关闭或超时后由大模型提炼的摘要 |
+| `summary` | `TEXT` | Nullable | Null | 预留字段（中期摘要已改内存存储，不再写入） |
 | `is_anonymous` | `BOOLEAN` | Not Null | `False` | 是否为匿名无痕树洞（阅后即焚标志） |
 
----
+### 4. 聊天消息明细表 (`chat_messages`)
 
-### 3. 聊天消息明细表 (`chat_messages`)
-*   **用途**：记录会话中发生的逐条对话记录，并保留系统的意图识别标签，方便回溯与诊断。
+*   **用途**：记录会话中发生的逐条对话记录（仅常规会话落库），并保留系统的意图识别标签。
 *   **结构定义**：
 
 | 字段名称 | 数据类型 | 约束条件 | 默认值 | 描述说明 |
@@ -50,71 +64,70 @@ MySQL 主要管理系统的核心业务数据、结构化画像及聊天流水�
 | `session_id` | `VARCHAR(36)` | Foreign Key (`chat_sessions.id`), Not Null | - | 关联的会话 ID |
 | `sender` | `VARCHAR(10)` | Not Null | - | 发送人类型（`"user"`: 学生，`"ai"`: AI） |
 | `content` | `TEXT` | Not Null | - | 对话消息文本正文 |
-| `intent` | `VARCHAR(50)` | Nullable | Null | 系统识别的意图类型（`CRISIS`, `KNOWLEDGE`, `EMOTION`, `CHITCHAT`） |
+| `intent` | `VARCHAR(50)` | Nullable | Null | 系统识别的意图类型（`CRISIS`, `KNOWLEDGE`, `EMOTION`） |
 | `created_at` | `DATETIME` | Not Null | `CURRENT_TIMESTAMP` | 消息发送时间 |
 
----
+### 5. 知识文档导入任务表 (`knowledge_imports`)
 
-### 4. 心理科普知识卡片表 (`knowledge_cards`)
-*   **用途**：存储专家或心理中心录入的标准科普卡片，用于与 ChromaDB 做关联查询。
+*   **用途**：记录知识文档上传/入库任务状态（异步 worker 处理），关联 ChromaDB `psychology_kb` 集合。
 *   **结构定义**：
 
 | 字段名称 | 数据类型 | 约束条件 | 默认值 | 描述说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| `id` | `INT` | Primary Key, Auto Increment | - | 知识卡片唯一自增 ID |
-| `title` | `VARCHAR(255)` | Unique, Not Null, Index | - | 心理学概念/主题名称（如“蝴蝶抱抱法”） |
-| `concept` | `TEXT` | Not Null | - | 用大白话解释的心理学概念（概念轻量释义） |
-| `tip` | `TEXT` | Not Null | - | 立即生效、易于操练的心理稳定化调节技巧 |
-| `tags` | `VARCHAR(255)` | Nullable | Null | 关联标签，以逗号分隔（如“焦虑,惊恐,稳定”） |
-| `created_at` | `DATETIME` | Not Null | `CURRENT_TIMESTAMP` | 卡片创建时间 |
+| `id` | `INT` | Primary Key, Auto Increment | - | 导入任务唯一自增 ID |
+| `file_name` | `VARCHAR(255)` | Not Null, Index | - | 原始文件名 |
+| `file_hash` | `VARCHAR(64)` | Unique, Not Null | - | 文件 SHA-256 哈希（去重） |
+| `minio_bucket` / `minio_object_name` | `VARCHAR` | Not Null | - | MinIO 存储位置 |
+| `file_size` | `INT` | Not Null | - | 文件字节数 |
+| `status` | `VARCHAR(20)` | Not Null | `pending` | `pending / processing / success / failed` |
+| `chunk_count` | `INT` | - | `0` | 生成的 chunk 总数 |
+| `processed_chunks` | `INT` | - | `0` | 已向量化完成的 chunk 数（异步进度） |
+| `error_message` | `TEXT` | Nullable | Null | 失败原因 |
+| `created_at` | `DATETIME` | Not Null | `CURRENT_TIMESTAMP` | 创建时间 |
+
+> 注：早期规划中的 `knowledge_cards` 表未落地；科普卡片数据以"文档导入 + 结构化切片"方式存入 ChromaDB。
 
 ---
 
 ## 二、 ChromaDB 向量数据库集合规约
 
-向量数据库存储文本特征向量（Embedding），当前模型参数为 1024 维（对应 `BAAI/bge-large-zh-v1.5`）。ChromaDB 包含三个主要的向量集合（Collections）。
+向量数据库存储文本特征向量（Embedding），当前模型参数为 1024 维（对应 `BAAI/bge-large-zh-v1.5`）。ChromaDB 当前包含 **两个** 核心向量集合。
 
 ### 1. 心理学科普知识库集合 (`psychology_kb`)
-*   **核心用途**：存放用于 RAG（检索增强生成）的专业心理概念与自我稳定化技巧。
-*   **物理 ID 规范**：使用 MySQL 中 `knowledge_cards.id` 的字符串作为 ID（若未落库，则使用 card 的 `title`），保证两库一致。
-*   **文本块 (Documents) 拼接模版**：
-    ```text
-    【主题】: {title}
-    【概念释义】: {concept}
-    【自助技巧】: {tip}
-    【标签】: {tags}
-    ```
+
+*   **核心用途**：存放用于 RAG（检索增强生成）的专业心理知识切片。
+*   **物理 ID 规范**：`{import_id}_chunk_{idx}`（导入任务 ID + chunk 序号）。
+*   **文本块 (Documents)**：上下文增强文本 `【标题路径】\n{chunk 正文}`。
 *   **元数据 (Metadata) 字典结构**：
     ```json
     {
-      "title": "知识卡片标题",
-      "tags": "标签1,标签2"
+      "import_id": 42,
+      "file_name": "CBT综述.pdf",
+      "chunk_index": 5,
+      "h1": "认知行为疗法",
+      "h2": "治疗方法",
+      "h3": "认知重构技术",
+      "section_id": "sec_2",
+      "parent_content": "## 治疗方法\n### 认知重构技术\n...(完整父文档小节)...",
+      "converter": "pymupdf4llm"
+    }
+    ```
+*   **检索方式**：Small-to-Big——命中子 chunk 后展开为父文档小节（H2 层级），供 LLM 注入。
+
+### 2. 安全预警样本集合 (`safety_warnings_kb`)
+
+*   **核心用途**：三级安全路由的 Level 3 兜底——将用户输入与高危/违规样本向量比对，相似度 > 0.85 时熔断为 CRISIS。
+*   **物理 ID 规范**：`db_sample_{id}`（对应 MySQL `safety_warning_samples` 表）。
+*   **元数据 (Metadata) 字典结构**：
+    ```json
+    {
+      "type": "high_risk | violation",
+      "text": "预警样本原始文本",
+      "db_id": 1
     }
     ```
 
-### 2. 意图种子句高频 FAQ 集合 (`intent_seeds_kb`) *(规划中)*
-*   **核心用途**：提供第二级向量路由拦截（FAQ 高频快速匹配），当用户输入与种子句余弦相似度 $> 0.85$ 时，跳过大模型推理直达业务层。
-*   **物理 ID 规范**：以种子句 MD5 散列值 or 自增字符串作为 ID。
-*   **文本块 (Documents)**：高频意图种子句（例如：“预约心理咨询中心在哪”、“如何判断自己是不是得了抑郁症”）。
-*   **元数据 (Metadata) 字典结构**：
-    ```json
-    {
-      "intent": "KNOWLEDGE",
-      "text": "高频种子句原始文本"
-    }
-    ```
-
-### 3. 会话历史语义事件集合 (`semantic_history_kb`) *(规划中)*
-*   **核心用途**：属于用户长期画像的辅助层。在用户退出或超时归档时，将单次会话摘要向量化存入，并在后续新对话启动时语义召回“前情提要”。
-*   **物理 ID 规范**：以 `session_id` 作为 ID。
-*   **文本块 (Documents)**：会话摘要总结文本。
-*   **元数据 (Metadata) 字典结构**：
-    ```json
-    {
-      "user_id": 12345,
-      "session_id": "session-uuid-xxxx-xxxx"
-    }
-    ```
+> 注：早期规划中的 `intent_seeds_kb`（FAQ 向量路由）与 `semantic_history_kb`（会话语义归档）**均已移除**——意图分类改由 LLM 三分类完成，长期记忆收敛为用户画像（见技术细节 02）。
 
 ---
 
@@ -130,21 +143,20 @@ sequenceDiagram
     participant LLM as 硅基流动大模型
 
     学生->>网关: 发送消息 ("躺在床上脑子乱转，睡不着...")
-    Note over 网关: 第一级: 硬规则过滤 (safety_rules.yaml)
-    Note over 网关: 第二级: FAQ 快速分类 (intent_seeds_kb)
-    Note over 网关: 第三级: 简单模型语义分类 (SIMPLE_LLM_MODEL)
+    Note over 网关: Level1: 敏感词硬匹配 (SafetyKeyword)
+    Note over 网关: Level2+3 并行: LLM三分类 + 预警向量检索
     网关->>MySQL: 保存用户输入并标记意图 (ChatMessage)
-    
+
     alt 命中 KNOWLEDGE 科普意图
-        网关->>Chroma: 提取 Query 向量并查询最相似的 TOP 2 科普卡片 (psychology_kb)
-        Chroma-->>网关: 返回匹配卡片及距离 (Ids: [3, 7])
-        网关->>MySQL: 根据 Ids 读取卡片实体详情 (KnowledgeCard)
-        MySQL-->>网关: 返回蝴蝶抱抱法等技巧文本
+        网关->>LLM: 查询重写 (rewrite_query)
+        Note over 网关: 对改写词重新向量化
+        网关->>Chroma: Small-to-Big 检索 TOP2 父文档 (psychology_kb)
+        Chroma-->>网关: 返回父文档及章节路径
+        网关->>LLM: 卡片提炼 (concept + tip)
     end
 
-    Note over 网关: 动态组装 Context Prompts (画像画像数据 + RAG知识)
-    网关->>LLM: 提交上下文并请求流式生成 (COMPLEX_LLM_MODEL)
+    Note over 网关: 动态组装 Prompt (四层记忆 + RAG卡片)
+    网关->>LLM: 提交上下文并流式生成 (COMPLEX_LLM_MODEL, 意图温度)
     LLM-->>学生: 流式 SSE 传输回复 (data: {content})
-    LLM-->>网关: 传输完毕
     网关->>MySQL: 保存 AI 回复内容 (ChatMessage)
 ```

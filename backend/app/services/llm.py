@@ -42,12 +42,6 @@ class IntentResponse(BaseModel):
     intent: Literal["KNOWLEDGE", "EMOTION", "CRISIS"] = Field(description="意图分类结果，必须是 KNOWLEDGE（科普咨询）、EMOTION（情绪宣泄闲聊）或 CRISIS（有自残、自杀倾向或严重心理危机之一）")
     reason: str = Field(description="分类的理由说明")
 
-class UserProfileResponse(BaseModel):
-    nickname: str = Field(description="用户昵称")
-    core_stressors: List[str] = Field(description="核心压力源列表")
-    effective_coping_methods: List[str] = Field(description="历史有效应对方法列表")
-    entity_relation_map: Dict[str, str] = Field(description="关键人际关系网络字典")
-
 class SiliconFlowService:
     """基于 LangChain 的硅基流动 (SiliconFlow) 大模型服务封装"""
     def __init__(self):
@@ -278,28 +272,27 @@ class SiliconFlowService:
             logger.error(f"结构化意图分类调用失败: {str(e)}")
             return {"intent": "EMOTION", "reason": "接口异常降级"}
 
-    def extract_profile(self, messages) -> dict:
-        """提取/合并用户画像特征"""
+    def extract_memory_bundle(self, messages) -> dict:
+        """
+        记忆合并提取：一次 LLM 调用同时输出【用户画像增量 + 滚动摘要】，
+        替代原先两条独立管线（画像提取 + 摘要压缩），减少重复分析与 LLM 调用。
+        """
         if not self.simple_chat_client:
-            return {
-                "nickname": "同学",
-                "core_stressors": ["学业压力"],
-                "effective_coping_methods": ["情绪宣泄"],
-                "entity_relation_map": {}
-            }
-            
+            logger.warning("运行于 Mock 简单模型模式，记忆合并提取返回空。")
+            return {}
+
         try:
-            parser = PydanticOutputParser(pydantic_object=UserProfileResponse)
             format_instructions = (
-                "请返回一个 JSON 对象，必须包含 \"nickname\"、\"core_stressors\"、\"effective_coping_methods\" 和 \"entity_relation_map\" 字段。请直接输出合法的 JSON 代码，不要包含 JSON Schema 定义或格式说明。数字/布尔值请遵循相应类型。示例如下：\n"
+                "请返回一个 JSON 对象，必须包含 \"nickname\"、\"core_stressors\"、\"effective_coping_methods\"、\"entity_relation_map\" 和 \"summary\" 字段。请直接输出合法的 JSON 代码，不要包含 JSON Schema 定义或格式说明。示例如下：\n"
                 "{\n"
                 "  \"nickname\": \"用户昵称\",\n"
                 "  \"core_stressors\": [\"压力源\"],\n"
                 "  \"effective_coping_methods\": [\"应对方法\"],\n"
-                "  \"entity_relation_map\": {\"人名/关系名\": \"具体亲疏或互动关系\"}\n"
+                "  \"entity_relation_map\": {\"人名/关系名\": \"具体亲疏或互动关系\"},\n"
+                "  \"summary\": \"150字以内的会话滚动摘要\"\n"
                 "}"
             )
-            
+
             modified_messages = []
             for msg in messages:
                 if msg.get("role") == "system":
@@ -309,18 +302,20 @@ class SiliconFlowService:
                     })
                 else:
                     modified_messages.append(msg)
-                    
+
             lc_msgs = self._convert_to_lc_messages(modified_messages)
             response = self.simple_chat_client.invoke(lc_msgs)
-            parsed_res = parser.parse(response.content)
+            import json as _json
+            parsed = _json.loads(response.content)
             return {
-                "nickname": parsed_res.nickname,
-                "core_stressors": parsed_res.core_stressors,
-                "effective_coping_methods": parsed_res.effective_coping_methods,
-                "entity_relation_map": parsed_res.entity_relation_map
+                "nickname": str(parsed.get("nickname", "")).strip(),
+                "core_stressors": parsed.get("core_stressors", []) or [],
+                "effective_coping_methods": parsed.get("effective_coping_methods", []) or [],
+                "entity_relation_map": parsed.get("entity_relation_map", {}) or {},
+                "summary": str(parsed.get("summary", "")).strip()
             }
         except Exception as e:
-            logger.error(f"结构化画像提取调用失败: {str(e)}")
+            logger.error(f"记忆合并提取调用失败: {str(e)}")
             return {}
 
     def call_simple_model(self, messages, temperature=0.0, max_tokens=100):
@@ -376,6 +371,53 @@ class SiliconFlowService:
             logger.error(f"查询重写调用失败，回退原文本: {str(e)}")
             return text.strip()
 
+    def refine_knowledge_card(self, query: str, content: str) -> dict:
+        """
+        知识卡片提炼：将 RAG 召回的父文档全文提炼为结构化科普卡片 {concept, tip}。
+        供前端卡片化展示（概念轻量释义 + 能量小技巧）。
+
+        Mock 模式 / 异常时回退：concept 取原文前 200 字，tip 为空，保证链路不中断。
+        """
+        if not content:
+            return {"concept": "", "tip": ""}
+        if not self.simple_chat_client:
+            logger.warning("运行于 Mock 简单模型模式，知识卡片返回原文截断。")
+            return {"concept": content[:200], "tip": ""}
+
+        try:
+            prompt = [
+                {"role": "system", "content": (
+                    "你是一个心理科普知识卡片提炼专家。请根据用户的查询与下方检索到的心理学科普原文，提炼为结构化卡片。\n"
+                    "【concept】用一两句大白话解释该心理学概念或问题，拒绝学术说教（100字以内）。\n"
+                    "【tip】给出 1 个立即生效、易操作的自助调节小技巧（50字以内）。\n"
+                    "请直接输出合法的 JSON 代码，不要包含任何额外解释文字，格式："
+                    '{"concept": "概念释义", "tip": "调节技巧"}'
+                )},
+                {"role": "user", "content": f"【用户查询】{query}\n\n【科普原文】\n{content[:800]}"}
+            ]
+            raw = self.call_simple_model(prompt, temperature=0.3, max_tokens=200)
+            try:
+                import json
+                parsed = json.loads(raw)
+                return {
+                    "concept": str(parsed.get("concept", "")).strip() or content[:200],
+                    "tip": str(parsed.get("tip", "")).strip()
+                }
+            except Exception:
+                # 尝试剥离 markdown 后二次解析
+                import re
+                m = re.search(r"(\{.*\})", raw, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(1))
+                    return {
+                        "concept": str(parsed.get("concept", "")).strip() or content[:200],
+                        "tip": str(parsed.get("tip", "")).strip()
+                    }
+                return {"concept": content[:200], "tip": ""}
+        except Exception as e:
+            logger.error(f"知识卡片提炼调用失败，回退原文截断: {str(e)}")
+            return {"concept": content[:200], "tip": ""}
+
     def call_complex_model_stream(self, messages, temperature=0.7, max_tokens=1024):
         """利用 LangChain ChatOpenAI.stream 唤起生成回复大模型，输出流式迭代生成器"""
         if not self.complex_chat_client:
@@ -402,24 +444,6 @@ class SiliconFlowService:
             return stream_generator()
         except Exception as e:
             logger.error(f"复杂模型流式调用失败 ({self.complex_model}): {str(e)}")
-            raise e
-
-    def call_summary_model(self, messages, temperature=0.3, max_tokens=1024):
-        """利用 LangChain ChatOpenAI 唤起推理大模型进行总结"""
-        if not self.summary_chat_client:
-            logger.warning("运行于 Mock 总结模型模式。")
-            return "【模拟总结】用户本次主要倾诉了期末备考引发的学业焦虑。画像中已同步此压力源。"
-
-        try:
-            lc_msgs = self._convert_to_lc_messages(messages)
-            response = self.summary_chat_client.invoke(
-                input=lc_msgs,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            return response.content.strip()
-        except Exception as e:
-            logger.error(f"总结模型调用失败 ({self.summary_model}): {str(e)}")
             raise e
 
 # 导出单例

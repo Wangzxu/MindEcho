@@ -14,9 +14,10 @@
 │ ③ 中期记忆        previous_summary 窗口之外的会话摘要（内存）   │
 │ ④ 长期画像        user_profile     MySQL user_profiles         │
 └────────────────────────────────────────────────────────────────┘
-┌─ 写入管线（后台异步）──────────────────────────────────────────┐
-│ 每 20 条消息: update_profile_background → 合并更新 user_profiles│
-│ 窗口超 20 条: compress_summary_background → 内存中期摘要        │
+┌─ 写入管线（后台异步，合并为一次调用）──────────────────────────┐
+│ update_memory_background → extract_memory_bundle（一次LLM）    │
+│   ├─ 画像增量 → 合并更新 user_profiles                        │
+│   └─ 滚动摘要 → 内存中期摘要（窗口超20条时）                   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -57,7 +58,7 @@
 - **定义**：12 条窗口之外的较老对话，压缩为 150 字以内的滚动摘要；
 - **存储**：进程内内存字典 `midterm_summaries_map = { session_id: summary }`，**不落库**，服务重启即清空；
 - **目的**：应对高强度连续聊天——连续聊 50 条时，前 38 条由摘要承载，上下文不丢失，同时不污染持久化存储；
-- **写入**：`compress_summary_background`（后台异步）把窗口外的对话连同旧摘要一起交给摘要模型合并生成新摘要，覆盖写入内存；
+- **写入**：`update_memory_background`（后台异步，合并任务）在触发时调用 `extract_memory_bundle`，一次输出画像增量 + 滚动摘要；窗口外对话连同旧摘要合并生成新摘要，覆盖写入内存；
 - **读取**：`load_context_node` 从 `midterm_summaries_map.get(session_id, "无往期历史。")` 读取。
 
 ### 2.4 ④ 长期画像层（user_profile）
@@ -69,7 +70,7 @@
   effective_coping_methods: List[str]  # 历史有效应对方法
   entity_relation_map: Dict[str, str]  # 关键人际关系网
   ```
-- **写入**：`update_profile_background`（后台异步）每 20 条消息触发一次，将最近 20 条对话原文 + 现有画像交给 `extract_profile`，由 LLM 合并更新画像字段；
+- **写入**：`update_memory_background`（后台异步）在滑窗触发时调用 `extract_memory_bundle`，将最近 20 条对话原文 + 现有画像 + 现有摘要交给 LLM 一次合并输出画像增量与滚动摘要，分别更新 MySQL 画像与内存摘要；
 - **读取**：`load_context_node` 查询 `UserProfile` 并注入 prompt 的【长期记忆与用户画像】段。
 
 ---
@@ -82,17 +83,16 @@
     ├─ CRISIS → crisis_handler（固定预案，不注入记忆）
     │
     └─ 其他 → load_context（装载四层记忆）
-         │   ├─ ① RAG: intent==KNOWLEDGE 时 search_knowledge
+         │   ├─ ① RAG: intent==KNOWLEDGE 时 查询重写 + retrieve_with_context
          │   ├─ ② 窗口: history_messages 最近12条 → recent_history
          │   ├─ ③ 中期: midterm_summaries_map[session_id] → previous_summary
          │   └─ ④ 画像: user_profiles → user_profile
          ▼
-    standard_chat（拼装 system prompt → 流式回复）
+    standard_chat（拼装 system prompt → 流式回复，意图定制温度）
          ▼
     save_message
          ├─ 非无痕: AI 回复落库
-         ├─ 每20条: 后台 update_profile_background（画像合并）
-         └─ 窗口>20条: 后台 compress_summary_background（内存摘要）
+         └─ 滑窗触发: 后台 update_memory_background（画像+摘要合并一次调用）
 ```
 
 Prompt 组装结构（`standard_chat_node`）：
@@ -114,9 +114,11 @@ Prompt 组装结构（`standard_chat_node`）：
 
 | 任务 | 触发条件 | 频率 | 数据来源 | 落库? |
 |---|---|---|---|---|
-| 画像提取 `update_profile_background` | `消息数 % 20 == 0` | 每 10 轮一次 | 常规：MySQL 最近 20 条；无痕：state 窗口 | ✅ 更新 `user_profiles` |
-| 中期摘要 `compress_summary_background` | `len(history) > 20` | 窗口涨到 20 条压一次 | state 滑动窗口 12 条之外 | ❌ 仅内存 |
+| 画像提取（并入记忆维护） | `消息数 ≥ 20 且增量 ≥ 10`（滑窗） | 每新增 10 条消息一次 | 常规：MySQL 最近 20 条；无痕：state 窗口 | ✅ 更新 `user_profiles` |
+| 中期摘要（并入记忆维护） | `len(history) > 20` | 窗口涨到 20 条压一次 | state 滑动窗口 12 条之外 | ❌ 仅内存 |
 
+- **滑窗触发**：画像不再依赖 `% 20 == 0` 恰好倍数（19 条停手不更新的空窗问题已消除），改为"自上次提取后新增 ≥ 10 条"触发；
+- **合并提取**：画像 + 摘要合并为一次后台 LLM 调用 `update_memory_background`（内部 `extract_memory_bundle`），一次输出画像增量 + 滚动摘要，减少重复分析与调用；
 - 画像计数：常规会话以**数据库真实消息数**为准（防重启重置）；无痕会话用 state 累计数；
 - 摘要压缩：压缩后窗口回到 12 条，继续聊到 20 条再触发，循环进行。
 
@@ -164,8 +166,8 @@ Qwen 简单模型非流式兜底（call_simple_model）
 |---|---|---|
 | 四层注入 | `backend/app/services/workflow/nodes.py` `load_context_node` | 装载窗口/摘要/画像/RAG |
 | Prompt 组装 | 同文件 `standard_chat_node` | 画像 + RAG + 中期摘要 + 窗口 |
-| 中期摘要写入 | 同文件 `compress_summary_background` | 内存 map，不落库 |
-| 画像更新 | 同文件 `update_profile_background` | 每 20 条合并画像 |
+| 中期摘要+画像写入 | 同文件 `update_memory_background` | 合并任务，一次 LLM 调用 |
+| 画像更新 | 同文件 `save_message_node` | 滑窗触发（增量≥10） |
 | 触发调度 | 同文件 `save_message_node` | 消息落库 + 画像/摘要触发判断 |
 | 状态字段 | `backend/app/services/workflow/state.py` | 4 部分记忆字段 |
 | 画像模型 | `backend/app/models/user_profile.py` | `core_stressors` 等字段 |
@@ -183,7 +185,7 @@ Qwen 简单模型非流式兜底（call_simple_model）
 | 窗口大小（最近消息条数） | 12 条 | `nodes.py load_context_node` |
 | 画像提取触发 | 每 20 条消息（`% 20 == 0`） | `nodes.py save_message_node` |
 | 中期摘要触发 | 窗口 > 20 条 | 同文件 |
-| 摘要长度上限 | 150 字 | `compress_summary_background` |
+| 摘要长度上限 | 150 字 | `llm.py extract_memory_bundle` prompt |
 | RAG 召回条数 | 2 张卡片（仅 KNOWLEDGE） | `load_context_node` |
 | 摘要存储 | 内存 `midterm_summaries_map` | `nodes.py` 模块级 |
 | 画像存储 | MySQL `user_profiles` | `user_profile.py` |

@@ -58,59 +58,73 @@ async def filter_and_route_node(state: ChatWorkflowState, config: RunnableConfig
                 matched_rule = f"命中敏感词: {kw.word}"
                 break
                 
-        # Level 2: 轻量大模型三分类意图识别 (KNOWLEDGE / EMOTION / CRISIS)
+        # Level 2 + Level 3 并行执行（两者只依赖 user_input，互不依赖）：
+        #   Level 2: 轻量大模型三分类意图识别 (KNOWLEDGE / EMOTION / CRISIS)
+        #   Level 3: 预警语义向量检索兜底（ChromaDB），与分类并行省一个 RTT
         if not intent:
-            logger.info("[filter_and_route_node] 正在执行 Level 2 意图三分类...")
-            classifier_messages = [
-                {"role": "system", "content": (
-                    "你是一个校园心理咨询系统的路由网关。请分析用户的当前输入，并将其精确分类为以下三类之一：\n"
-                    "- \"KNOWLEDGE\": 用户在提问具体的心理学概念、自助方法（例如CBT、蝴蝶抱抱法）或查询学校心理咨询中心的信息。\n"
-                    "- \"EMOTION\": 用户在进行倾诉、分享生活困扰（如考试挂科、科研不顺、室友关系差、失恋等），或进行日常打招呼、闲聊等互动。\n"
-                    "- \"CRISIS\": 用户表达了自残、自杀倾向，或者有严重的暴力倾向、绝望自毁心理。"
-                )},
-                {"role": "user", "content": user_input}
-            ]
+            logger.info("[filter_and_route_node] 正在并行执行 Level 2 意图三分类 + Level 3 预警向量检索...")
 
-            try:
-                logger.info("[filter_and_route_node] 准备调用 llm_service.classify_intent...")
-                res_json = llm_service.classify_intent(classifier_messages)
-                intent = res_json.get("intent", "EMOTION")
-                reason = res_json.get("reason", "模型意图分类")
-                logger.info(f"[filter_and_route_node] classify_intent 调用成功: intent={intent}, reason={reason}")
-            except Exception as le:
-                logger.error(f"大模型结构化意图分类调用失败: {le}")
-                intent = "EMOTION"
-                reason = "分类接口异常降级"
+            async def _classify():
+                classifier_messages = [
+                    {"role": "system", "content": (
+                        "你是一个校园心理咨询系统的路由网关。请分析用户的当前输入，并将其精确分类为以下三类之一：\n"
+                        "- \"KNOWLEDGE\": 用户在提问具体的心理学概念、自助方法（例如CBT、蝴蝶抱抱法）或查询学校心理咨询中心的信息。\n"
+                        "- \"EMOTION\": 用户在进行倾诉、分享生活困扰（如考试挂科、科研不顺、室友关系差、失恋等），或进行日常打招呼、闲聊等互动。\n"
+                        "- \"CRISIS\": 用户表达了自残、自杀倾向，或者有严重的暴力倾向、绝望自毁心理。"
+                    )},
+                    {"role": "user", "content": user_input}
+                ]
+                try:
+                    logger.info("[filter_and_route_node] 准备调用 llm_service.classify_intent...")
+                    res_json = await asyncio.to_thread(llm_service.classify_intent, classifier_messages)
+                    intent_res = res_json.get("intent", "EMOTION")
+                    reason_res = res_json.get("reason", "模型意图分类")
+                    logger.info(f"[filter_and_route_node] classify_intent 调用成功: intent={intent_res}, reason={reason_res}")
+                    return intent_res, reason_res
+                except Exception as le:
+                    logger.error(f"大模型结构化意图分类调用失败: {le}")
+                    return "EMOTION", "分类接口异常降级"
 
-        # Level 3: 预警语义向量检索 (ChromaDB 检索) -> 仅对非 CRISIS 的输入进行单次向量嵌入并作为兜底安全防线
-        if intent != "CRISIS":
-            logger.info("[filter_and_route_node] 正在执行 Level 3 预警向量库检索...")
-            try:
-                logger.info("[filter_and_route_node] 准备调用 llm_service.get_embedding 获取输入向量...")
-                user_input_embedding = llm_service.get_embedding(user_input)
-                logger.info("[filter_and_route_node] get_embedding 成功")
-                collection = vector_db.get_collection("safety_warnings_kb")
-                results = collection.query(
-                    query_embeddings=[user_input_embedding],
-                    n_results=1
-                )
-                if results and results.get("distances") and len(results["distances"][0]) > 0:
-                    distance = results["distances"][0][0]
-                    similarity = 1.0 - distance
-                    if similarity > 0.85:  # 余弦相似度大于 0.85
-                        matched_text = results["documents"][0][0]
-                        logger.info(f"触发预警向量库语义相似匹配兜底: {matched_text}, 相似度: {similarity:.2f}")
-                        intent = "CRISIS"
-                        reason = f"语义相似度匹配危机样本兜底: {matched_text} ({similarity*100:.1f}%)"
-                        
-                        matched_type = "high_risk"
-                        if results.get("metadatas") and len(results["metadatas"][0]) > 0:
-                            matched_type = results["metadatas"][0][0].get("type", "high_risk")
-                        
-                        log_type = matched_type
-                        matched_rule = f"预警语义匹配兜底: {matched_text} (相似度: {similarity:.2f})"
-            except Exception as ve:
-                logger.error(f"预警向量库语义检索异常: {ve}")
+            async def _safety_vec_check():
+                try:
+                    logger.info("[filter_and_route_node] 准备调用 llm_service.get_embedding 获取输入向量...")
+                    embedding = await asyncio.to_thread(llm_service.get_embedding, user_input)
+                    logger.info("[filter_and_route_node] get_embedding 成功")
+                    collection = vector_db.get_collection("safety_warnings_kb")
+                    results = await asyncio.to_thread(
+                        collection.query,
+                        query_embeddings=[embedding],
+                        n_results=1
+                    )
+                    return embedding, results
+                except Exception as ve:
+                    logger.error(f"预警向量库语义检索异常: {ve}")
+                    return None, None
+
+            (intent, reason), (user_input_embedding, safety_results) = await asyncio.gather(
+                _classify(), _safety_vec_check()
+            )
+
+            # Level 3 结果处理：相似度 > 0.85 升级为 CRISIS（仅当 Level 2 未判危机）
+            if intent != "CRISIS" and safety_results:
+                try:
+                    if safety_results.get("distances") and len(safety_results["distances"][0]) > 0:
+                        distance = safety_results["distances"][0][0]
+                        similarity = 1.0 - distance
+                        if similarity > 0.85:  # 余弦相似度大于 0.85
+                            matched_text = safety_results["documents"][0][0]
+                            logger.info(f"触发预警向量库语义相似匹配兜底: {matched_text}, 相似度: {similarity:.2f}")
+                            intent = "CRISIS"
+                            reason = f"语义相似度匹配危机样本兜底: {matched_text} ({similarity*100:.1f}%)"
+
+                            matched_type = "high_risk"
+                            if safety_results.get("metadatas") and len(safety_results["metadatas"][0]) > 0:
+                                matched_type = safety_results["metadatas"][0][0].get("type", "high_risk")
+
+                            log_type = matched_type
+                            matched_rule = f"预警语义匹配兜底: {matched_text} (相似度: {similarity:.2f})"
+                except Exception as ve:
+                    logger.error(f"预警向量结果解析异常: {ve}")
 
         # 会话标题为固定名称（直接聊天/无痕树洞），注册时创建，不再自动生成
 
@@ -239,7 +253,20 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
                     "h3": pr.get("h3", ""),
                     "score": pr.get("score", 0),
                     "source_chunks": pr.get("source_chunks", []),
+                    "concept": "",
+                    "tip": "",
                 })
+            # 4.5 卡片提炼：父文档全文 → 结构化 concept/tip（并行处理，失败回退原文）
+            try:
+                refined = await asyncio.gather(*[
+                    asyncio.to_thread(llm_service.refine_knowledge_card, rewritten_query, card["content"])
+                    for card in rag_cards
+                ])
+                for card, rf in zip(rag_cards, refined):
+                    card["concept"] = rf.get("concept", card["content"][:200])
+                    card["tip"] = rf.get("tip", "")
+            except Exception as re:
+                logger.warning(f"RAG 卡片提炼失败，回退原文展示: {re}")
             logger.info(f"RAG 科普知识检索召回，条数: {len(rag_cards)}（改写后查询: {rewritten_query}）")
 
         # 核心元数据（意图标签 + 知识卡片）打包装入 SSE 队列通知前端
@@ -313,17 +340,27 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
             "- 长期记忆融合：根据用户画像，自然得体地在对话中嵌入用户的历史应对技巧或关键人际关系进行针对性引导。"
         )
 
-    nickname = state["user_profile"].get("nickname", "同学")
-    core_stressors = ", ".join(state["user_profile"].get("core_stressors", [])) or "未明确"
-    effective_coping_methods = ", ".join(state["user_profile"].get("effective_coping_methods", [])) or "未明确"
-    entity_relation_map = ", ".join([f"{k}:{v}" for k, v in state["user_profile"].get("entity_relation_map", {}).items()]) or "无"
+    # 画像字段裁剪（控制 prompt 长度）：压力源/应对方法最多 5 条、关系网最多 5 条
+    profile = state["user_profile"]
+    nickname = profile.get("nickname", "同学")
+    core_stressors = ", ".join(profile.get("core_stressors", [])[:5]) or "未明确"
+    effective_coping_methods = ", ".join(profile.get("effective_coping_methods", [])[:5]) or "未明确"
+    entity_relation_map = ", ".join(
+        [f"{k}:{v}" for k, v in list(profile.get("entity_relation_map", {}).items())[:5]]
+    ) or "无"
     previous_summary = state["previous_summary"]
     recent_history = state["recent_history"]
 
     rag_text = ""
     if state["rag_cards"]:
         for card in state["rag_cards"]:
-            rag_text += f"- (来自 {card.get('file_name', '未知文件')}):\n{card['content']}\n\n"
+            # 优先展示提炼后的概念释义 + 技巧；未提炼时回退父文档全文
+            concept = card.get("concept") or card.get("content", "")
+            tip = card.get("tip")
+            rag_text += f"- (来自 {card.get('file_name', '未知文件')}):\n{concept}"
+            if tip:
+                rag_text += f"\n  💡 调节技巧: {tip}"
+            rag_text += "\n\n"
 
     system_prompt = (
         "你是一个面向高校学生的 AI 心理委员，名字叫「小影」，角色定位是温柔、包容、非批判性的心理专家学姐。你非常善于倾听、温暖安慰同学，同时擅长深度剖析并进行针对性的追问引导。\n\n"
@@ -345,12 +382,15 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
         {"role": "user", "content": user_input}
     ]
 
+    # 意图定制温度：KNOWLEDGE 重准确（低温）、EMOTION 重共情自然（高温）
+    intent_temperature = {"KNOWLEDGE": 0.3, "EMOTION": 0.8}.get(intent, 0.7)
+
     logger.info("=== [standard_chat_node] 开始执行 ===")
     full_reply = ""
     fallback_used = False
     try:
-        logger.info("[standard_chat_node] 正在发起流式回复请求...")
-        response_stream = llm_service.call_complex_model_stream(messages, temperature=0.7)
+        logger.info(f"[standard_chat_node] 正在发起流式回复请求... (intent={intent}, temperature={intent_temperature})")
+        response_stream = llm_service.call_complex_model_stream(messages, temperature=intent_temperature)
         logger.info("[standard_chat_node] 获取流式生成生成器成功，准备接收数据...")
         for chunk in response_stream:
             full_reply += chunk
@@ -361,7 +401,7 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
         # 降级链 1：复杂模型失败 → 简单模型非流式兜底
         logger.error(f"大模型流式输出发生异常: {e}，尝试降级到简单模型...")
         try:
-            fallback_reply = llm_service.call_simple_model(messages, temperature=0.7, max_tokens=1024)
+            fallback_reply = llm_service.call_simple_model(messages, temperature=intent_temperature, max_tokens=1024)
             if fallback_reply and fallback_reply != "{}":
                 full_reply = fallback_reply
                 fallback_used = True
@@ -393,95 +433,102 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
     }
 
 
-async def update_profile_background(current_user_id: int, history_segment: List[Dict[str, str]]):
-    """后台进行个人特征画像建模更新"""
+async def update_memory_background(
+    current_user_id: int | None,
+    session_id: str,
+    history_segment: List[Dict[str, str]],
+    to_compress_segment: List[Dict[str, str]],
+    is_anonymous: bool = False
+):
+    """
+    后台记忆维护任务（合并版）：
+    一次 LLM 调用（extract_memory_bundle）同时完成
+      1. 用户画像合并更新（长期记忆，MySQL user_profiles）
+      2. 窗口外对话压缩为中期摘要（内存 midterm_summaries_map，不落库）
+
+    相比原先两条独立管线（画像提取 + 摘要压缩），减少一次重复分析与 LLM 调用。
+    history_segment 为空时只做摘要；to_compress_segment 为空时只做画像。
+    """
     db = SessionLocal()
     try:
-        logger.info(f"后台任务启动：开始为用户 {current_user_id} 进行个人特征建模画像更新...")
-        profile = db.query(UserProfile).filter(UserProfile.user_id == current_user_id).first()
-        if not profile:
-            profile = UserProfile(user_id=current_user_id)
-            db.add(profile)
-            db.commit()
-            db.refresh(profile)
-        
-        # 拼接最近这 20 条消息的对话内容
+        # 拼接最近对话（画像用）
         recent_chat_text = ""
         for m in history_segment:
             role = "学生" if m["sender"] == 'user' else "AI"
             recent_chat_text += f"{role}: {m['content']}\n"
-        
-        current_profile_dict = {
-            "nickname": profile.nickname,
-            "core_stressors": profile.core_stressors or [],
-            "effective_coping_methods": profile.effective_coping_methods or [],
-            "entity_relation_map": profile.entity_relation_map or {}
-        }
-        
-        profile_messages = [
-            {"role": "system", "content": (
-                "你是一个心理特征画像提取专家。请基于用户目前的心理画像和最近的对话记录，提取并更新用户的心理特征。\n"
-                "【注意】不要遗失之前已有的重要画像内容，仅做合并与更新。"
-            )},
-            {"role": "user", "content": f"【当前画像】:\n{json.dumps(current_profile_dict, ensure_ascii=False)}\n\n【最近对话】:\n{recent_chat_text}"}
-        ]
-        
-        # 运行同步阻塞方法在大模型服务的线程池中，避免阻塞主事件循环
-        profile_json = await asyncio.to_thread(llm_service.extract_profile, profile_messages)
-        if profile_json:
-            if "nickname" in profile_json and profile_json["nickname"]:
-                profile.nickname = profile_json["nickname"]
-            if "core_stressors" in profile_json:
-                profile.core_stressors = profile_json["core_stressors"]
-            if "effective_coping_methods" in profile_json:
-                profile.effective_coping_methods = profile_json["effective_coping_methods"]
-            if "entity_relation_map" in profile_json:
-                profile.entity_relation_map = profile_json["entity_relation_map"]
-            
-            db.commit()
-            logger.info(f"后台任务完成：个人心理画像更新建模成功！昵称: {profile.nickname}")
-    except Exception as pe:
-        db.rollback()
-        logger.error(f"后台大模型结构化画像提取失败: {pe}")
-    finally:
-        db.close()
 
-
-async def compress_summary_background(session_id: str, to_compress_segment: List[Dict[str, str]]):
-    """
-    后台进行滚动上下文摘要生成与压缩（中期记忆，内存存储不落库）。
-    将窗口（12条）之外的较老对话压缩为摘要，应对高强度连续聊天时的上下文丢失。
-    """
-    db = SessionLocal()
-    try:
-        logger.info(f"后台任务启动：开始对会话 {session_id} 进行滚动会话摘要压缩...")
-        # 拼接要压缩的对话内容
+        # 拼接窗口外对话（摘要用）
         compress_text = ""
         for m in to_compress_segment:
             role = "学生" if m["sender"] == 'user' else "AI"
             compress_text += f"{role}: {m['content']}\n"
 
-        # 取上一次的中期摘要作参考（内存）
+        # 读取当前画像（MySQL）与当前中期摘要（内存）
+        current_profile_dict = {}
+        profile = None
+        if current_user_id:
+            profile = db.query(UserProfile).filter(UserProfile.user_id == current_user_id).first()
+            if not profile:
+                profile = UserProfile(user_id=current_user_id)
+                db.add(profile)
+                db.commit()
+                db.refresh(profile)
+            current_profile_dict = {
+                "nickname": profile.nickname,
+                "core_stressors": profile.core_stressors or [],
+                "effective_coping_methods": profile.effective_coping_methods or [],
+                "entity_relation_map": profile.entity_relation_map or {}
+            }
         old_summary = midterm_summaries_map.get(session_id, "无往期历史摘要。")
 
-        summary_messages = [
+        # 只传有实际内容的段落，避免空 prompt
+        user_content_parts = []
+        if current_profile_dict:
+            user_content_parts.append(f"【当前画像】:\n{json.dumps(current_profile_dict, ensure_ascii=False)}")
+        if recent_chat_text:
+            user_content_parts.append(f"【最近对话】:\n{recent_chat_text}")
+        if compress_text:
+            user_content_parts.append(f"【窗口外待沉淀对话】:\n{compress_text}")
+        user_content_parts.append(f"【当前中期摘要】:\n{old_summary}")
+        if not user_content_parts:
+            return
+
+        memory_messages = [
             {"role": "system", "content": (
-                "你是一个会话摘要总结专家。请结合已有的旧摘要和最近新发生的对话段落，将这些较老的对话细节以精简的客观心理学总结合并记录。\n"
-                "仅关注用户的压力源、情感转折以及心理变化，并保持总结简明扼要（150字以内）。不要输出任何额外的废话。"
+                "你是一个心理记忆维护专家。请基于用户目前的心理画像、最近对话、窗口外对话与现有摘要，"
+                "完成两件事：\n"
+                "1. 合并更新用户心理画像（不要遗失已有重要内容，仅做合并与更新）。\n"
+                "2. 生成/合并 150 字以内的会话滚动摘要（关注压力源、情感转折与心理变化）。"
             )},
-            {"role": "user", "content": f"【往期历史摘要】:\n{old_summary}\n\n【最新已沉淀对话】:\n{compress_text}"}
+            {"role": "user", "content": "\n\n".join(user_content_parts)}
         ]
 
         # 运行同步阻塞方法在大模型服务的线程池中，避免阻塞主事件循环
-        new_summary = await asyncio.to_thread(llm_service.call_summary_model, summary_messages, temperature=0.3)
+        bundle = await asyncio.to_thread(llm_service.extract_memory_bundle, memory_messages)
+        if not bundle:
+            logger.warning(f"记忆合并提取返回空，跳过更新 (session={session_id})")
+            return
 
-        if new_summary:
-            # 中期记忆统一存内存，不落库（无痕与常规会话一致；服务重启即清空）
-            midterm_summaries_map[session_id] = new_summary
+        # 1. 画像更新（若本次包含画像段）
+        if profile and bundle.get("nickname"):
+            if bundle.get("nickname"):
+                profile.nickname = bundle["nickname"]
+            if bundle.get("core_stressors"):
+                profile.core_stressors = bundle["core_stressors"]
+            if bundle.get("effective_coping_methods"):
+                profile.effective_coping_methods = bundle["effective_coping_methods"]
+            if bundle.get("entity_relation_map"):
+                profile.entity_relation_map = bundle["entity_relation_map"]
+            db.commit()
+            logger.info(f"后台任务完成：用户 {current_user_id} 画像更新成功！昵称: {profile.nickname}")
+
+        # 2. 中期摘要更新（若本次包含压缩段）
+        if to_compress_segment and bundle.get("summary"):
+            midterm_summaries_map[session_id] = bundle["summary"]
             logger.info(f"后台任务完成：会话 {session_id} 中期摘要压缩成功并已存入内存缓存")
-    except Exception as se:
+    except Exception as pe:
         db.rollback()
-        logger.error(f"后台滚动上下文摘要压缩异常: {se}")
+        logger.error(f"后台记忆维护任务异常: {pe}")
     finally:
         db.close()
 
@@ -523,8 +570,10 @@ async def save_message_node(state: ChatWorkflowState, config: RunnableConfig) ->
                 db.rollback()
                 logger.error(f"持久化 AI 回复异常: {e}")
 
-        # B. 轮数检查：每10轮 (20条消息) 进行一次个人特征画像建模（后台异步）
-        # 对常规会话，我们以数据库内真实持久化消息数为准，以防止重启导致计数重置；对无痕会话，我们以 state 里的累计消息数为准
+        # B+C. 记忆维护：画像滑窗触发 + 窗口外摘要压缩，合并为一次后台 LLM 调用
+        #  - 画像：每新增 >= 10 条消息触发一次（滑窗，避免 %20 恰好倍数才触发的空窗问题）
+        #  - 摘要：窗口超出 12 条时把窗口外对话压缩进中期记忆（内存）
+        # 常规会话以数据库真实消息数为准（防重启重置）；无痕会话以 state 累计数为准
         total_messages = message_count
         if not is_anonymous:
             try:
@@ -534,38 +583,49 @@ async def save_message_node(state: ChatWorkflowState, config: RunnableConfig) ->
             except Exception as e:
                 logger.error(f"查询数据库消息数出错，降级为 state 计数: {e}")
 
-        if current_user_id and total_messages >= 20 and total_messages % 20 == 0:
-            logger.info(f"当前会话累计已达 {total_messages} 条消息，触发后台异步个人特征画像建模...")
+        last_profile_count = state.get("last_profile_message_count") or 0
+        needs_profile = bool(current_user_id) and total_messages >= 20 and (total_messages - last_profile_count) >= 10
+        needs_compress = len(history) > 20
+
+        if needs_profile or needs_compress:
+            logger.info(
+                f"触发后台记忆维护任务 (profile={needs_profile}, compress={needs_compress}, "
+                f"total_msgs={total_messages})..."
+            )
             history_segment = []
-            if not is_anonymous:
-                try:
-                    # 常规会话：从 MySQL 加载最近 20 条消息，以防滑动窗口裁剪导致画像分析缺失细节
-                    db_msgs = db.query(ChatMessage).filter(
-                        ChatMessage.session_id == session_id
-                    ).order_by(ChatMessage.created_at.desc()).limit(20).all()
-                    db_msgs.reverse()
-                    history_segment = [{"sender": msg.sender, "content": msg.content} for msg in db_msgs]
-                except Exception as he:
-                    logger.error(f"加载画像建模最近消息历史失败: {he}")
+            if needs_profile:
+                if not is_anonymous:
+                    try:
+                        # 常规会话：从 MySQL 加载最近 20 条消息，以防滑动窗口裁剪导致画像分析缺失细节
+                        db_msgs = db.query(ChatMessage).filter(
+                            ChatMessage.session_id == session_id
+                        ).order_by(ChatMessage.created_at.desc()).limit(20).all()
+                        db_msgs.reverse()
+                        history_segment = [{"sender": msg.sender, "content": msg.content} for msg in db_msgs]
+                    except Exception as he:
+                        logger.error(f"加载画像建模最近消息历史失败: {he}")
+                        history_segment = list(history[-20:])
+                else:
+                    # 无痕会话：从 state 缓存拿（最大 12 条滑动窗口）
                     history_segment = list(history[-20:])
-            else:
-                # 无痕会话：由于数据库中没有消息，我们只能从 state 缓存中拿（最大为 12 条的滑动窗口）
-                history_segment = list(history[-20:])
 
-            asyncio.create_task(update_profile_background(current_user_id, history_segment))
+            to_compress = list(history[:-12]) if needs_compress else []
+            keep_window = list(history[-12:]) if needs_compress else None
 
-        # C. 上下文压缩：当缓存中消息超出 12 条（窗口）时，把窗口之外的对话滚动压缩为中期摘要（内存）
-        # 每次裁剪后保留最新的 12 条作为活跃上下文窗口，分批压缩以避免每轮都调用 LLM 造成资源浪费
-        if len(history) > 20:
-            to_compress = list(history[:-12])
-            keep_window = list(history[-12:])
-            logger.info(f"活跃会话已达 {len(history)} 条消息，裁剪状态窗口并触发后台滚动中期摘要压缩...")
-            asyncio.create_task(compress_summary_background(session_id, to_compress))
+            asyncio.create_task(update_memory_background(
+                current_user_id=current_user_id,
+                session_id=session_id,
+                history_segment=history_segment,
+                to_compress_segment=to_compress,
+                is_anonymous=is_anonymous
+            ))
+            # 更新画像滑窗计数
+            last_profile_count = total_messages
 
     finally:
         db.close()
 
-    return_dict = {"message_count": message_count}
+    return_dict = {"message_count": message_count, "last_profile_message_count": last_profile_count}
     if keep_window is not None:
         return_dict["history_messages"] = keep_window
     return return_dict

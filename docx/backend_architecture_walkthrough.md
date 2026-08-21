@@ -1,53 +1,58 @@
-# MindEcho (FastAPI) 后端骨架说明书
+# MindEcho (FastAPI) 后端架构说明书
 
-我们已经成功将 MindEcho 后端框架由 Flask 迁移至 **FastAPI**，拆分了数据模型与数据契约，并引入了外部配置文件管理安全红线词库。
-同时，我们完成了首个核心业务功能——**登录与注册模块**的开发，设计了账号鉴权（`users`）与心理画像（`user_profiles`）1对1分离的高隐私数据隔离架构。
+MindEcho 后端基于 **FastAPI** 构建，拆分了数据模型与数据契约，采用 **LangGraph 状态化工作流** 驱动对话生成，并以 MySQL + ChromaDB 双轨存储支撑"感性右脑 + 理性左脑"双驱动架构。
 
-## 1. 后端骨架目录结构
-
-重构并增加登录注册鉴权后的后端代码结构如下所示：
+## 1. 后端目录结构
 
 ```
 backend/
-├── app.py                      # 后端入口文件 (使用 Uvicorn 运行)
-├── config.py                   # 环境变量配置加载模块 (含 JWT 鉴权配置)
-├── requirements.txt            # 项目依赖声明列表 (包含 PyJWT 与 bcrypt 依赖)
+├── main.py                     # 后端入口文件 (Uvicorn 运行，端口 5000)
+├── app.py                      # 旧入口提示（已迁移至 main.py，避免与 app/ 冲突）
+├── config.py                   # 环境变量配置加载模块 (模型/MinIO/Chroma/JWT)
+├── requirements.txt            # 项目依赖声明列表
 ├── .env                        # 本地环境变量配置文件
 ├── .env.example                # 环境变量配置模板
-├── verify_backend.py           # 骨架与集成验证脚本 (适配用户注册登录与多子模型)
+├── verify_backend.py           # 骨架与集成验证脚本
 └── app/                        # 应用核心包
-    ├── __init__.py             # FastAPI App 工厂函数与 Lifespan 生命周期定义
-    ├── data/                   # 外部静态数据/配置库
-    │   └── safety_rules.yaml   # 安全红线硬规则敏感词库
+    ├── __init__.py             # FastAPI App 工厂函数与 Lifespan 生命周期
     ├── database/               # 数据库集成层
     │   ├── __init__.py
-    │   ├── mysql.py            # MySQL (SQLAlchemy) Session 依赖注入源
+    │   ├── mysql.py            # MySQL (SQLAlchemy) Session + 建表迁移
     │   └── vector.py           # ChromaDB 向量数据库持久客户端
-    ├── models/                 # SQLAlchemy 物理数据模型包 (已拆分并隔离)
+    ├── models/                 # SQLAlchemy 物理数据模型包
     │   ├── __init__.py         # 统一导出
-    │   ├── user.py             # User 账号凭证与鉴权角色模型 (修改)
-    │   ├── user_profile.py     # UserProfile 敏感心理画像模型 (新建)
-    │   ├── session.py          # ChatSession 会话模型
+    │   ├── user.py             # User 账号凭证与角色模型
+    │   ├── user_profile.py     # UserProfile 心理画像模型（长期记忆）
+    │   ├── session.py          # ChatSession 会话模型（固定双会话）
     │   ├── message.py          # ChatMessage 对话明细模型
-    │   └── knowledge.py        # KnowledgeCard 心理科普卡片模型
-    ├── schemas/                # Pydantic 传输模型与数据契约包 (已拆分)
-    │   ├── __init__.py         # 统一导出
+    │   ├── knowledge.py        # KnowledgeImport 文档导入任务模型
+    │   ├── safety_keyword.py   # SafetyKeyword 敏感词模型
+    │   ├── safety_warning_sample.py  # SafetyWarningSample 预警向量样本
+    │   └── security_activity_log.py  # SecurityActivityLog 安全日志
+    ├── schemas/                # Pydantic 传输模型与数据契约包
+    │   ├── __init__.py
     │   ├── base.py             # 统一响应结构 Result
-    │   ├── auth.py             # 注册、登录、Token及画像校验契约 (新建)
-    │   ├── session.py          # 会话接口请求与响应模型
-    │   ├── message.py          # 消息接口请求与响应模型
-    │   └── health.py           # 健康状态诊断实体
+    │   ├── auth.py             # 注册、登录、Token及画像契约
+    │   ├── session.py / message.py / health.py / safety.py / knowledge.py
     ├── services/               # 业务核心服务层
     │   ├── __init__.py
-    │   ├── auth_service.py     # 密码 Bcrypt 哈希与 JWT Token 生成校验服务 (新建)
-    │   ├── llm.py              # 硅基流动 API 客户端封装
-    │   ├── intent.py           # 三级混合路由意图分类服务
-    │   └── rag.py              # 向量库同步与混合检索服务
+    │   ├── auth_service.py     # 密码 Bcrypt 哈希与 JWT Token 服务
+    │   ├── llm.py              # 硅基流动 LLM/Embedding 客户端（含批量嵌入、重写、提炼）
+    │   ├── rag.py              # RAG 入库管线 + Small-to-Big 检索 + 链路追踪
+    │   ├── intent.py           # 意图路由服务（安全词热加载）
+    │   ├── converter.py        # 多格式文档 → Markdown 统一转换器
+    │   ├── storage.py          # MinIO 对象存储服务
+    │   └── workflow/           # LangGraph 状态化工作流（核心生成链路）
+    │       ├── __init__.py
+    │       ├── graph.py        # StateGraph 节点编排与条件边
+    │       ├── state.py        # ChatWorkflowState 状态定义
+    │       └── nodes.py        # 五节点：路由/装载/危机/生成/持久化
     └── routes/                 # FastAPI APIRouter 路由控制层
         ├── __init__.py
-        ├── auth.py             # 注册、登录路由与全局 get_current_user 鉴权依赖项 (新建)
+        ├── auth.py             # 注册、登录、get_current_user/get_current_admin 鉴权
         ├── health.py           # 系统健康状况诊断接口
-        └── chat.py             # 心理会话管理与 sse-starlette 流式接口 (已关联登录用户)
+        ├── chat.py             # 心理会话 + SSE 流式接口
+        └── admin.py            # 教师端后台（安全词/学生画像/知识库管理）
 ```
 
 以及在工作区根目录下导出的数据库脚本：
@@ -69,6 +74,19 @@ backend/
 
 ### 🛡️ 3. 数据隔离鉴权 (Security Gate)
 - 会话历史 `/api/chat/session/{session_id}/history` 与发送消息 `/api/chat/message` 新增了严格的所有权校验：非匿名会话中，非拥有者且非 `admin` 管理员的角色将直接触发 `HTTP 403 Forbidden` 拦截，杜绝了会话隐私越权漏洞。
+
+### 🔀 4. 对话生成工作流 (LangGraph)
+对话生成由 `services/workflow/` 下的 LangGraph 状态化工作流驱动，共 5 个节点：
+
+| 节点 | 职责 |
+|---|---|
+| `filter_and_route` | 三级安全路由（敏感词 / LLM 三分类 / 预警向量，Level2+3 并行） |
+| `load_context` | 装载四层记忆（RAG 卡片 + 窗口 + 中期摘要 + 画像），KNOWLEDGE 时做查询重写 + Small-to-Big 检索 + 卡片提炼 |
+| `crisis_handler` | 危机固定预案（热线/地址），不注入记忆 |
+| `standard_chat` | 拼装 prompt → 流式生成（意图定制温度 + 两级降级链） |
+| `save_message` | 消息落库 + 记忆维护（画像滑窗 + 摘要合并一次调用） |
+
+详见 [tech-details/02-memory-architecture.md](file:///F:/python_dev/projects/MindEcho/docx/tech-details/02-memory-architecture.md) 与 [tech-details/03-generation-optimization.md](file:///F:/python_dev/projects/MindEcho/docx/tech-details/03-generation-optimization.md)。
 
 ---
 

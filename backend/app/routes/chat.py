@@ -118,6 +118,8 @@ async def send_message(
             "user_msg_id": user_msg_id,
             "intent": "",
             "intent_reason": "",
+            "message_count": 0,
+            "last_profile_message_count": 0,
             "recent_history": "",
             "previous_summary": "",
             "user_profile": {},

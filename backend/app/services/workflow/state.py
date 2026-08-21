@@ -19,6 +19,9 @@ class ChatWorkflowState(TypedDict):
     # 累计消息轮数计数器 (用于无痕会话等画像建模判定)
     message_count: int | None
     
+    # 上次画像提取时的消息数（滑窗触发用：增量 >= 10 再触发，避免 19 条停手不更新）
+    last_profile_message_count: int | None
+    
     # 记忆系统的 4 部分装载（四层记忆架构）
     recent_history: str             # 1. 最近12条原始对话拼接字符串（窗口层）
     previous_summary: str           # 2. 中期记忆：窗口之外的会话摘要（内存，不落库）
