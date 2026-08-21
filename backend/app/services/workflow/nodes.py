@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 from langchain_core.runnables import RunnableConfig
 
 from app.services.llm import llm_service
-from app.services.rag import rag_service
+from app.services.rag import retrieve_with_context
 from app.database.vector import vector_db
 from app.database.mysql import SessionLocal
 from app.models import ChatMessage, SecurityActivityLog, SafetyKeyword, UserProfile
@@ -211,14 +211,36 @@ async def load_context_node(state: ChatWorkflowState, config: RunnableConfig) ->
             if profile:
                 user_profile = profile.to_dict()
 
-        # 4. 专业 RAG 科普知识库检索（仅 KNOWLEDGE 意图）
+        # 4. 专业 RAG 科普知识库检索（仅 KNOWLEDGE 意图）：查询重写 → 向量化 → Small-to-Big 召回
         rag_cards = []
+        rewritten_query = ""
         if intent == "KNOWLEDGE":
-            query_vector = state.get("user_input_embedding")
-            if query_vector is None:
-                query_vector = llm_service.get_embedding(user_input)
-            rag_cards = rag_service.search_knowledge(db, user_input, limit=2, query_vector=query_vector)
-            logger.info(f"RAG 科普知识检索召回，条数: {len(rag_cards)}")
+            # 4.1 查询重写：口语化长文本 → 纯粹心理检索词，降低向量检索噪声
+            rewritten_query = llm_service.rewrite_query(user_input)
+            # 4.2 用改写后的检索词向量化（不复用安全路由阶段的原始输入向量，因文本已变化）
+            query_vector = llm_service.get_embedding(rewritten_query)
+            # 4.3 Small-to-Big 检索：命中子 chunk 后展开为完整父文档小节，返回来源章节
+            retrieved = retrieve_with_context(
+                query=rewritten_query,
+                top_k=2,
+                query_vector=query_vector
+            )
+            # 4.4 适配前端卡片结构：title 用章节路径 h1>h2>h3，兜底文件名
+            rag_cards = []
+            for pr in retrieved:
+                title_parts = [p for p in [pr.get("h1", ""), pr.get("h2", ""), pr.get("h3", "")] if p]
+                title = " > ".join(title_parts) if title_parts else pr.get("file_name", "科普知识卡")
+                rag_cards.append({
+                    "title": title,
+                    "content": pr.get("content", ""),
+                    "file_name": pr.get("file_name", "未知"),
+                    "h1": pr.get("h1", ""),
+                    "h2": pr.get("h2", ""),
+                    "h3": pr.get("h3", ""),
+                    "score": pr.get("score", 0),
+                    "source_chunks": pr.get("source_chunks", []),
+                })
+            logger.info(f"RAG 科普知识检索召回，条数: {len(rag_cards)}（改写后查询: {rewritten_query}）")
 
         # 核心元数据（意图标签 + 知识卡片）打包装入 SSE 队列通知前端
         if queue:
@@ -325,6 +347,7 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
 
     logger.info("=== [standard_chat_node] 开始执行 ===")
     full_reply = ""
+    fallback_used = False
     try:
         logger.info("[standard_chat_node] 正在发起流式回复请求...")
         response_stream = llm_service.call_complex_model_stream(messages, temperature=0.7)
@@ -335,10 +358,30 @@ async def standard_chat_node(state: ChatWorkflowState, config: RunnableConfig) -
                 await queue.put({"type": "content", "content": chunk})
             await asyncio.sleep(0.01)
     except Exception as e:
-        logger.error(f"大模型流式输出发生异常: {e}")
-        if queue:
-            await queue.put({"type": "error", "message": f"流式输出异常: {str(e)}"})
-        raise e
+        # 降级链 1：复杂模型失败 → 简单模型非流式兜底
+        logger.error(f"大模型流式输出发生异常: {e}，尝试降级到简单模型...")
+        try:
+            fallback_reply = llm_service.call_simple_model(messages, temperature=0.7, max_tokens=1024)
+            if fallback_reply and fallback_reply != "{}":
+                full_reply = fallback_reply
+                fallback_used = True
+                if queue:
+                    await queue.put({"type": "content", "content": fallback_reply})
+            else:
+                raise ValueError("降级模型返回为空")
+        except Exception as e2:
+            # 降级链 2：简单模型也失败 → 固定安抚话术，保证用户始终得到回复
+            logger.error(f"降级模型调用也失败: {e2}，使用固定安抚话术")
+            full_reply = (
+                "听到你说了这么多，我很想好好回应你，但刚才我的思绪好像断了一下。\n"
+                "请再给我一点时间，你可以把刚才的话再说一遍吗？我一直在这里陪着你。"
+            )
+            fallback_used = True
+            if queue:
+                await queue.put({"type": "content", "content": full_reply})
+        finally:
+            if fallback_used:
+                await queue.put({"type": "metadata", "data": {"intent": state["intent"], "fallback": True}})
 
     # 同步 AI 消息入 history_messages 缓存
     history = list(state.get("history_messages", []))

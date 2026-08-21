@@ -446,9 +446,20 @@ def trace_retrieval(query: str) -> dict:
         "steps": []
     }
 
-    # Step 1: Embedding
+    # Step 1: Query Rewriting 查询重写
     t0 = time.time()
-    query_vector = llm_service.get_embedding(query)
+    rewritten_query = llm_service.rewrite_query(query)
+    rewrite_time_ms = int((time.time() - t0) * 1000)
+    trace["steps"].append({
+        "name": "查询重写 (Query Rewriting)",
+        "original": query,
+        "rewritten": rewritten_query,
+        "duration_ms": rewrite_time_ms
+    })
+
+    # Step 2: Embedding（对改写后的查询向量化）
+    t0 = time.time()
+    query_vector = llm_service.get_embedding(rewritten_query)
     embedding_time_ms = int((time.time() - t0) * 1000)
     trace["steps"].append({
         "name": "Embedding 向量化",
@@ -457,7 +468,7 @@ def trace_retrieval(query: str) -> dict:
         "duration_ms": embedding_time_ms
     })
 
-    # Step 2: ChromaDB search (raw top-K children)
+    # Step 3: ChromaDB search (raw top-K children)
     t0 = time.time()
     collection = vector_db.get_collection(COLLECTION_NAME)
     raw_results = collection.query(
@@ -466,7 +477,7 @@ def trace_retrieval(query: str) -> dict:
     )
     search_time_ms = int((time.time() - t0) * 1000)
 
-    # Step 3: Parse raw results into full chunk cards
+    # Step 3.5: Parse raw results into full chunk cards
     chunks_detail = []
     if raw_results and raw_results.get("ids") and len(raw_results["ids"][0]) > 0:
         ids = raw_results["ids"][0]

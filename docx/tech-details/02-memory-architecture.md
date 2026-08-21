@@ -34,9 +34,12 @@
 ### 2.1 ① RAG 召回层（rag_cards）
 
 - **触发**：仅当意图为 `KNOWLEDGE`（用户提问心理学概念/自助方法）时；
-- **实现**：`load_context_node` 调用 `rag_service.search_knowledge(db, user_input, limit=2)`，在 `psychology_kb` 集合做 Small-to-Big 混合检索，返回最多 2 张科普卡片；
-- **向量复用**：优先复用安全路由阶段缓存的 `user_input_embedding`，避免重复计算；
-- **注入**：`standard_chat_node` 将卡片拼进 prompt 的【专业知识库检索内容】段。
+- **查询重写**：先由 `llm_service.rewrite_query(user_input)` 将口语化长文本提炼为 1~2 个纯粹心理检索词（如"这两天躺在床上脑子乱转睡不着"→"焦虑引起的失眠 调节小技巧"），降低向量检索噪声；Mock 模式/失败时回退原文本；
+- **向量计算**：对改写后的查询词重新 embedding（不复用安全路由阶段的原始输入向量，因文本已变化）；
+- **Small-to-Big 检索**：`retrieve_with_context` 命中 top-3 子 chunk 后展开为完整父文档小节（H2 层级），返回来源章节路径 h1/h2/h3、父文档全文与相似度分数；
+- **前端卡片适配**：title 由章节路径 `h1 > h2 > h3` 拼接（无章节时用文件名兜底），前端 MessageArea 直接展示 title + 父文档 content；
+- **注入**：`standard_chat_node` 将卡片拼进 prompt 的【专业知识库检索内容】段；
+- **链路调试**：`trace_retrieval` 新增"查询重写"步骤，展示改写前后文本，前端链路调试 Tab 以 ✏️ 图标呈现。
 
 ### 2.2 ② 窗口层（recent_history）
 
@@ -135,7 +138,27 @@ Prompt 组装结构（`standard_chat_node`）：
 
 ---
 
-## 6. 关键代码位置
+## 6. 回复生成与失败降级
+
+`standard_chat_node` 生成最终回复，带**两级降级链**，保证用户永远得到回复：
+
+```
+DeepSeek-V3 流式生成（temp 0.7）
+   │ 成功 → 正常流式输出
+   ▼ 失败
+Qwen 简单模型非流式兜底（call_simple_model）
+   │ 成功 → 输出降级回复
+   ▼ 失败
+固定安抚话术（"听到你说了这么多…我一直在这里陪着你。"）
+```
+
+- 降级时不再向 SSE 抛出 error，而是输出可用的回复内容；
+- 降级发生时会额外推送 `metadata.fallback: true`，供前端标识；
+- 对话状态与历史照常保存，不影响后续轮次。
+
+---
+
+## 7. 关键代码位置
 
 | 模块 | 文件 | 说明 |
 |---|---|---|
@@ -153,7 +176,7 @@ Prompt 组装结构（`standard_chat_node`）：
 
 ---
 
-## 7. 关键参数速查
+## 8. 关键参数速查
 
 | 参数 | 值 | 位置 |
 |---|---|---|

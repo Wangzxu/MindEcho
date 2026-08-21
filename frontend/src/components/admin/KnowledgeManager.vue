@@ -158,6 +158,8 @@
             <div class="step-body">
               <div class="step-name">{{ step.name }}</div>
               <div class="step-meta">
+                <span v-if="step.original" class="rewrite-orig">原输入: {{ step.original }}</span>
+                <span v-if="step.rewritten" class="rewrite-new">✏️ 改写: {{ step.rewritten }}</span>
                 <span v-if="step.model">模型: {{ step.model }}</span>
                 <span v-if="step.dimension">维度: {{ step.dimension }}</span>
                 <span v-if="step.collection">集合: {{ step.collection }}</span>
@@ -482,6 +484,7 @@ const tracing = ref(false)
 const traceData = ref(null)
 
 function stepIcon(name) {
+  if (name.includes('重写') || name.includes('Rewriting')) return '✏️'
   if (name.includes('Embedding')) return '🧮'
   if (name.includes('ChromaDB') || name.includes('向量')) return '🗄️'
   if (name.includes('父文档') || name.includes('Small')) return '📤'
@@ -643,6 +646,8 @@ fetchList()
 .step-body { flex: 1; }
 .step-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 .step-meta { display: flex; gap: 12px; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
+.rewrite-orig { color: var(--text-secondary); }
+.rewrite-new { color: #8e44ad; font-weight: 500; }
 
 .chunk-cards { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .chunk-card { border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden; }

@@ -341,6 +341,41 @@ class SiliconFlowService:
             logger.error(f"简单模型调用失败 ({self.simple_model}): {str(e)}")
             raise e
 
+    def rewrite_query(self, text: str) -> str:
+        """
+        查询重写（Query Rewriting）：将用户的口语化长文本提炼为 1~2 个纯粹的心理检索关键词，
+        用于 RAG 召回阶段替代原始输入，降低向量检索噪声。
+
+        例: "这两天躺在床上脑子乱转，一闭眼就是明天的PPT，烦死了"
+            → "焦虑引起的失眠 调节小技巧"
+
+        Mock 模式 / 异常时回退原文本，保证检索链路不中断。
+        """
+        if not text or not text.strip():
+            return text
+        if not self.simple_chat_client:
+            logger.warning("运行于 Mock 简单模型模式，查询重写返回原文本。")
+            return text.strip()
+
+        try:
+            prompt = [
+                {"role": "system", "content": (
+                    "你是一个心理咨询检索关键词提炼器。请将用户的长文本输入提炼为 1~2 个简洁、纯粹的心理检索关键词"
+                    "（例如把\"这两天躺在床上脑子乱转，一闭眼就是明天的PPT，烦死了\"提炼为\"焦虑引起的失眠 调节小技巧\"）。\n"
+                    "【约束】只输出检索关键词本身，不要包含任何解释性文字、标点符号、引号或编号。"
+                )},
+                {"role": "user", "content": text}
+            ]
+            rewritten = self.call_simple_model(prompt, temperature=0.0, max_tokens=30)
+            rewritten = rewritten.strip().strip('"').strip("'").strip("“").strip("”")
+            if rewritten:
+                logger.info(f"查询重写成功: \"{text[:20]}...\" → \"{rewritten}\"")
+                return rewritten
+            return text.strip()
+        except Exception as e:
+            logger.error(f"查询重写调用失败，回退原文本: {str(e)}")
+            return text.strip()
+
     def call_complex_model_stream(self, messages, temperature=0.7, max_tokens=1024):
         """利用 LangChain ChatOpenAI.stream 唤起生成回复大模型，输出流式迭代生成器"""
         if not self.complex_chat_client:
